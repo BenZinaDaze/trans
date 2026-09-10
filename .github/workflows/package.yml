@@ -1,0 +1,98 @@
+name: Arch Linux package
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arch-package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: Build and verify x86_64 package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check packaging scripts and release guards
+        run: |
+          bash -n packaging/PKGBUILD packaging/build-arch.sh packaging/verify-arch.sh
+          python3 -m unittest discover -s tests -p test_packaging.py -v
+      - name: Prepare source and validate release version
+        id: prepare
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          args=(--output-dir "$RUNNER_TEMP/tran-input" --repository "$GITHUB_REPOSITORY")
+          if [[ "$REF_TYPE" == tag ]]; then
+            args+=(--tag "$REF_NAME")
+          fi
+          python3 packaging/prepare.py "${args[@]}"
+          mkdir -p "$RUNNER_TEMP/tran-packages"
+      - name: Pull official Arch Linux image
+        run: docker pull archlinux:base-devel
+      - name: Build package, lint QML and run tests
+        run: |
+          docker run --rm \
+            --mount "type=bind,src=$RUNNER_TEMP/tran-input,dst=/input,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/tran-packages,dst=/output" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/packaging,dst=/scripts,readonly" \
+            archlinux:base-devel bash /scripts/build-arch.sh
+      - name: Install and smoke test in a fresh Arch container
+        env:
+          TRAN_VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          docker run --rm \
+            --mount "type=bind,src=$RUNNER_TEMP/tran-packages,dst=/packages,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/packaging,dst=/scripts,readonly" \
+            archlinux:base-devel bash /scripts/verify-arch.sh "$TRAN_VERSION"
+      - name: Upload verified package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tran-arch-x86_64
+          path: |
+            ${{ runner.temp }}/tran-packages/*.pkg.tar.zst
+            ${{ runner.temp }}/tran-packages/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish tagged release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tran-arch-x86_64
+          path: packages
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          TRAN_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          [[ "$RELEASE_TAG" == "v$TRAN_VERSION" ]]
+          cd packages
+          sha256sum --check SHA256SUMS
+          # Reuse the release on reruns; replace only these named attachments.
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag \
+              --title "Tran $RELEASE_TAG" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" ./*.pkg.tar.zst SHA256SUMS --clobber

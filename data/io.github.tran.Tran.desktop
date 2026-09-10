@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Tran
+GenericName=Selection Translator
+GenericName[zh_CN]=选区翻译
+Comment=Translate selected text with a global shortcut
+Comment[zh_CN]=使用全局快捷键翻译选中的文本
+Exec=tran
+Icon=tran
+Terminal=false
+Categories=Utility;Qt;
+StartupNotify=false
