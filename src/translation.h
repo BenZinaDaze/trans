@@ -6,7 +6,7 @@
 #include <QJsonObject>
 #include <QStringList>
 
-namespace Tran {
+namespace Trans {
 
 struct TranslationRequest {
     QString text;
@@ -66,8 +66,8 @@ public:
     using QObject::QObject;
     virtual void cancel() = 0;
 signals:
-    void succeeded(const Tran::TranslationResult &result);
-    void failed(const Tran::TranslationError &error);
+    void succeeded(const Trans::TranslationResult &result);
+    void failed(const Trans::TranslationError &error);
 };
 
 class TranslationProvider {
@@ -82,7 +82,7 @@ QString defaultSystemPrompt();
 QString renderSystemPrompt(const TranslationRequest &request);
 QString validateConfig(const ProviderDescriptor &descriptor, const ProviderConfig &config, bool requireReady = true);
 
-} // namespace Tran
+} // namespace Trans
 
-Q_DECLARE_METATYPE(Tran::TranslationResult)
-Q_DECLARE_METATYPE(Tran::TranslationError)
+Q_DECLARE_METATYPE(Trans::TranslationResult)
+Q_DECLARE_METATYPE(Trans::TranslationError)

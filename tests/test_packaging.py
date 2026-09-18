@@ -22,7 +22,7 @@ class PackagingTest(unittest.TestCase):
         self.repo.mkdir()
         (self.repo / "packaging").mkdir()
         (self.repo / "CMakeLists.txt").write_text(
-            "project(tran VERSION 0.1.0 LANGUAGES CXX)\n")
+            "project(trans VERSION 1.0.0 LANGUAGES CXX)\n")
         (self.repo / "packaging/PKGBUILD").write_text(
             (PROJECT / "packaging/PKGBUILD").read_text())
         self.git("init", "--quiet")
@@ -38,43 +38,44 @@ class PackagingTest(unittest.TestCase):
         env.pop("GITHUB_OUTPUT", None)
         return subprocess.run(
             [sys.executable, str(PROJECT / "packaging/prepare.py"),
-             "--output-dir", str(self.root / "output"), "--repository", "example/tran", *args],
+             "--output-dir", str(self.root / "output"), "--repository", "example/trans", *args],
             cwd=self.repo, env=env, capture_output=True, text=True)
 
     def test_archive_and_metadata_use_committed_files(self):
         # Local edits, user config and build products must not affect a release archive.
-        (self.repo / "CMakeLists.txt").write_text("project(tran VERSION 9.9.9 LANGUAGES CXX)")
+        (self.repo / "CMakeLists.txt").write_text("project(trans VERSION 9.9.9 LANGUAGES CXX)")
         (self.repo / "settings.ini").write_text("apiKey=local-only-fixture")
         (self.repo / "packaging/PKGBUILD").write_text("uncommitted template")
         (self.repo / "build").mkdir()
-        (self.repo / "build/tran").write_text("old executable")
-        result = self.prepare("--tag", "v0.1.0")
+        (self.repo / "build/trans").write_text("old executable")
+        result = self.prepare("--tag", "v1.0.0")
         self.assertEqual(result.returncode, 0, result.stderr)
         output = self.root / "output"
-        archive = output / "tran-0.1.0.tar.gz"
+        archive = output / "trans-1.0.0.tar.gz"
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         recipe = (output / "PKGBUILD").read_text()
-        self.assertIn("pkgver=0.1.0", recipe)
-        self.assertIn("url=https://github.com/example/tran", recipe)
+        self.assertIn("pkgname=trans", recipe)
+        self.assertIn("pkgver=1.0.0", recipe)
+        self.assertIn("url=https://github.com/example/trans", recipe)
         self.assertIn(digest, recipe)
         self.assertNotIn("@VERSION@", recipe)
         with tarfile.open(archive) as source:
             self.assertEqual(set(source.getnames()), {
-                "tran-0.1.0", "tran-0.1.0/CMakeLists.txt", "tran-0.1.0/packaging",
-                "tran-0.1.0/packaging/PKGBUILD"})
-            self.assertIn(b"VERSION 0.1.0", source.extractfile("tran-0.1.0/CMakeLists.txt").read())
+                "trans-1.0.0", "trans-1.0.0/CMakeLists.txt", "trans-1.0.0/packaging",
+                "trans-1.0.0/packaging/PKGBUILD"})
+            self.assertIn(b"VERSION 1.0.0", source.extractfile("trans-1.0.0/CMakeLists.txt").read())
 
     def test_branch_build_needs_no_tag(self):
         result = self.prepare()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((self.root / "output/tran-0.1.0.tar.gz").is_file())
+        self.assertTrue((self.root / "output/trans-1.0.0.tar.gz").is_file())
 
     def test_invalid_or_mismatched_tags_fail_before_packaging(self):
-        for tag in ["v0.2.0", "0.1.0", "v0.1.0-rc1", "v0.1.0\n", "vlatest"]:
+        for tag in ["v0.2.0", "1.0.0", "v1.0.0-rc1", "v1.0.0\n", "vlatest"]:
             with self.subTest(tag=tag):
                 result = self.prepare("--tag", tag)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("release tag must be v0.1.0", result.stderr)
+                self.assertIn("release tag must be v1.0.0", result.stderr)
                 self.assertFalse((self.root / "output").exists())
 
 

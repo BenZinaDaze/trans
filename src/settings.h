@@ -3,7 +3,7 @@
 #include "providers.h"
 #include <QtQml/qqmlregistration.h>
 
-namespace Tran {
+namespace Trans {
 
 QString validateShortcut(const QString &shortcut);
 
@@ -53,4 +53,4 @@ private:
     QString m_error;
 };
 
-} // namespace Tran
+} // namespace Trans

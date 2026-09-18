@@ -9,7 +9,7 @@
 class QSystemTrayIcon;
 class QMenu;
 
-namespace Tran {
+namespace Trans {
 
 struct SelectionResult { QString text; QString error; };
 
@@ -27,7 +27,10 @@ public:
 class ShortcutService : public QObject {
     Q_OBJECT
 public:
-    explicit ShortcutService(QObject *parent = nullptr);
+    explicit ShortcutService(QObject *parent = nullptr,
+                             const QString &actionId = QStringLiteral("translate-selection"),
+                             const QString &label = QStringLiteral("选区翻译"),
+                             const QString &defaultSequence = QStringLiteral("Meta+Shift+T"));
     virtual void initialize(const QString &sequence);
     virtual bool apply(const QString &sequence);
     virtual QString sequence() const;
@@ -39,6 +42,7 @@ signals:
 private:
     QAction m_action;
     QString m_text;
+    QString m_defaultSequence;
     QString m_error;
     bool m_initialized = false;
 };
@@ -57,21 +61,23 @@ private:
 
 class DesktopBridge final : public QObject {
     Q_OBJECT
-    Q_CLASSINFO("D-Bus Interface", "io.github.tran.Tran")
+    Q_CLASSINFO("D-Bus Interface", "io.github.trans.Trans")
     QML_ELEMENT
     QML_UNCREATABLE("Created by the application")
+    Q_PROPERTY(bool captureActive READ captureActive NOTIFY captureVisibilityChanged)
     Q_PROPERTY(QString shortcutText READ shortcutText NOTIFY shortcutChanged)
     Q_PROPERTY(QString shortcutError READ shortcutError NOTIFY shortcutChanged)
     Q_PROPERTY(QString settingsError READ settingsError NOTIFY settingsErrorChanged)
     Q_PROPERTY(QSize popupAvailableSize READ popupAvailableSize NOTIFY popupAvailableSizeChanged)
 public:
     DesktopBridge(TranslationController &controller, AppSettings &settings, QObject *parent = nullptr,
-                  ShortcutService *shortcut = nullptr);
+                  ShortcutService *shortcut = nullptr, ShortcutService *screenshotShortcut = nullptr);
     ~DesktopBridge() override;
     void setWindows(QWindow *popup, QWindow *settings);
     void initialize();
+    bool captureActive() const { return m_captureHidden; }
     QString shortcutText() const { return m_shortcut->text(); }
-    QString shortcutError() const { return m_shortcut->error(); }
+    QString shortcutError() const { return m_shortcut->error().isEmpty() ? m_screenshotShortcut->error() : m_shortcut->error(); }
     QString settingsError() const { return m_settingsError; }
     QSize popupAvailableSize() const;
     Q_INVOKABLE void resizeTranslation(QSize preferred);
@@ -82,8 +88,10 @@ public:
     Q_INVOKABLE QString shortcutForKey(int key, int modifiers) const;
     Q_SCRIPTABLE Q_INVOKABLE void ShowTranslation();
     Q_SCRIPTABLE Q_INVOKABLE void TranslateSelection();
+    Q_SCRIPTABLE Q_INVOKABLE void TranslateScreenshot();
     Q_SCRIPTABLE Q_INVOKABLE void ShowSettings();
 signals:
+    void captureVisibilityChanged();
     void shortcutChanged();
     void settingsErrorChanged();
     void popupAvailableSizeChanged();
@@ -92,16 +100,22 @@ protected:
 private:
     void showTranslationWindow();
     void watchPopupScreen();
+    void restoreCaptureWindows();
     TranslationController &m_controller;
     AppSettings &m_settings;
     X11SelectionReader m_selection;
     std::unique_ptr<ShortcutService> m_ownedShortcut;
     ShortcutService *m_shortcut;
+    std::unique_ptr<ShortcutService> m_ownedScreenshotShortcut;
+    ShortcutService *m_screenshotShortcut;
+    bool m_captureHidden = false;
+    bool m_popupWasVisible = false;
+    bool m_settingsWasVisible = false;
     QString m_settingsError;
     PopupPresenter m_presenter;
     QPointer<QWindow> m_popup;
     QPointer<QWindow> m_settingsWindow;
-    QSize m_preferredPopupSize{360, 300};
+    QSize m_preferredPopupSize{480, 360};
     QSize m_reportedPopupAvailableSize;
     bool m_resizePending = false;
     QMetaObject::Connection m_screenGeometryConnection;
@@ -109,4 +123,4 @@ private:
     std::unique_ptr<QSystemTrayIcon> m_tray;
 };
 
-} // namespace Tran
+} // namespace Trans

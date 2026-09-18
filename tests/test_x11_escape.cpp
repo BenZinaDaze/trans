@@ -1,5 +1,6 @@
 #include "controller.h"
 #include "desktop.h"
+#include "region_capture.h"
 #include "provider_tools.h"
 
 #include <KGlobalAccel>
@@ -15,12 +16,13 @@
 #include <QQuickWindow>
 #include <QScopeGuard>
 #include <QScreen>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextStream>
 #include <QTimer>
 
-using namespace Tran;
+using namespace Trans;
 
 // A separate process provides a real PRIMARY selection and owns keyboard focus.
 class SelectionSource final : public QLineEdit {
@@ -71,6 +73,46 @@ private:
     }
 
 private slots:
+    void regionScreenshot()
+    {
+        const auto oldFocus = KX11Extras::activeWindow();
+        const auto oldCursor = QCursor::pos();
+        const auto restore = qScopeGuard([&] {
+            QCursor::setPos(oldCursor);
+            if (KX11Extras::hasWId(oldFocus)) KX11Extras::forceActiveWindow(oldFocus);
+        });
+        auto findOverlay = []() -> QWidget * {
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (widget->objectName() == "screenshotRegionOverlay" && widget->isVisible()
+                    && widget->geometry().contains(QCursor::pos())) return widget;
+            return nullptr;
+        };
+        auto *job = createScreenshotJob(this);
+        QVERIFY(qobject_cast<X11RegionScreenshotJob *>(job));
+        QSignalSpy success(job, &ScreenshotJob::succeeded);
+        QSignalSpy failure(job, &ScreenshotJob::failed);
+        QTRY_VERIFY(findOverlay());
+        auto *overlay = findOverlay();
+        const auto origin = overlay->mapToGlobal(QPoint(50, 60));
+        const auto end = overlay->mapToGlobal(QPoint(230, 160));
+        QVERIFY(xdotool({"mousemove", QString::number(origin.x()), QString::number(origin.y()), "mousedown", "1"}));
+        QVERIFY(xdotool({"mousemove", QString::number(end.x()), QString::number(end.y()), "mouseup", "1"}));
+        QTRY_COMPARE(success.size(), 1);
+        QVERIFY(failure.isEmpty());
+        const auto image = qvariant_cast<QImage>(success.first().first());
+        const qreal dpr = QGuiApplication::screenAt(origin)->devicePixelRatio();
+        QVERIFY(qAbs(image.width() - 180 * dpr) <= 1);
+        QVERIFY(qAbs(image.height() - 100 * dpr) <= 1);
+        QTRY_VERIFY(!findOverlay());
+        // Escape must work immediately, without clicking to focus the overlay.
+        job = createScreenshotJob(this);
+        QSignalSpy cancelled(job, &ScreenshotJob::failed);
+        QTRY_VERIFY(findOverlay());
+        QVERIFY(xdotool({"key", "Escape"}));
+        QTRY_COMPARE(cancelled.size(), 1);
+        QCOMPARE(qvariant_cast<TranslationError>(cancelled.first().first()).code, ErrorCode::Cancelled);
+        QTRY_VERIFY(!findOverlay());
+    }
     void automaticPopupSize_data()
     {
         QTest::addColumn<QString>("position");
@@ -108,7 +150,7 @@ private slots:
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
             {"controller", QVariant::fromValue(&controller)}, {"desktop", QVariant::fromValue(&desktop)},
             {"providerTools", QVariant::fromValue(&tools)}});
-        engine.load(QUrl::fromLocalFile(QStringLiteral(TRAN_SOURCE_DIR "/qml/Main.qml")));
+        engine.load(QUrl::fromLocalFile(QStringLiteral(TRANS_SOURCE_DIR "/qml/Main.qml")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *popup = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         auto *window = popup->findChild<QQuickWindow *>("settingsWindow");
@@ -168,7 +210,7 @@ private slots:
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
             {"controller", QVariant::fromValue(&controller)}, {"desktop", QVariant::fromValue(&desktop)},
             {"providerTools", QVariant::fromValue(&tools)}});
-        engine.load(QUrl::fromLocalFile(QStringLiteral(TRAN_SOURCE_DIR "/qml/Main.qml")));
+        engine.load(QUrl::fromLocalFile(QStringLiteral(TRANS_SOURCE_DIR "/qml/Main.qml")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *popup = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         auto *window = popup->findChild<QQuickWindow *>("settingsWindow");
@@ -238,9 +280,9 @@ private slots:
 
     void shortcutRestoresWithoutSelfConflict()
     {
-        // Use our own KDE component and unused keys; never edit Tran's real binding.
+        // Use our own KDE component and unused keys; never edit Trans's real binding.
         const auto originalName = QCoreApplication::applicationName();
-        const auto component = QStringLiteral("tran-shortcut-regression-%1").arg(QCoreApplication::applicationPid());
+        const auto component = QStringLiteral("trans-shortcut-regression-%1").arg(QCoreApplication::applicationPid());
         QCoreApplication::setApplicationName(component);
         const auto restoreName = qScopeGuard([&] { QCoreApplication::setApplicationName(originalName); });
         auto *accelerator = KGlobalAccel::self();
@@ -251,7 +293,7 @@ private slots:
         const auto cleanup = qScopeGuard([&] {
             QAction action;
             action.setObjectName(QStringLiteral("translate-selection"));
-            action.setText(QStringLiteral("Tran temporary shortcut regression test"));
+            action.setText(QStringLiteral("Trans temporary shortcut regression test"));
             accelerator->setDefaultShortcut(&action, {});
             accelerator->removeAllShortcuts(&action);
         });
@@ -259,7 +301,7 @@ private slots:
             // This is the binding the daemon remembers after a previous process exits.
             QAction saved;
             saved.setObjectName(QStringLiteral("translate-selection"));
-            saved.setText(QStringLiteral("Tran temporary shortcut regression test"));
+            saved.setText(QStringLiteral("Trans temporary shortcut regression test"));
             QVERIFY(accelerator->setShortcut(&saved, {owned}, KGlobalAccel::NoAutoloading));
             QCOMPARE(accelerator->shortcut(&saved), QList<QKeySequence>{owned});
         }
@@ -275,7 +317,7 @@ private slots:
             QAction other;
             other.setProperty("componentName", component + QStringLiteral("-other"));
             other.setObjectName(QStringLiteral("other-action"));
-            other.setText(QStringLiteral("Tran temporary conflict regression test"));
+            other.setText(QStringLiteral("Trans temporary conflict regression test"));
             const auto removeOther = qScopeGuard([&] { accelerator->removeAllShortcuts(&other); });
             QVERIFY(accelerator->setShortcut(&other, {occupied}, KGlobalAccel::NoAutoloading));
             QCOMPARE(accelerator->shortcut(&other), QList<QKeySequence>{occupied});
@@ -335,7 +377,7 @@ private slots:
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
             {"controller", QVariant::fromValue(&controller)}, {"desktop", QVariant::fromValue(&desktop)},
             {"providerTools", QVariant::fromValue(&tools)}});
-        engine.load(QUrl::fromLocalFile(QStringLiteral(TRAN_SOURCE_DIR "/qml/Main.qml")));
+        engine.load(QUrl::fromLocalFile(QStringLiteral(TRANS_SOURCE_DIR "/qml/Main.qml")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *popup = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         auto *settingsWindow = popup->findChild<QQuickWindow *>("settingsWindow");
@@ -364,7 +406,7 @@ private slots:
 
         QAction action;
         action.setObjectName(QStringLiteral("escape-regression-%1").arg(QCoreApplication::applicationPid()));
-        action.setText(QStringLiteral("Tran temporary Escape regression test"));
+        action.setText(QStringLiteral("Trans temporary Escape regression test"));
         auto *accelerator = KGlobalAccel::self();
         const QKeySequence key(QStringLiteral("Ctrl+Alt+Shift+F12"));
         QVERIFY(KGlobalAccel::isGlobalShortcutAvailable(key));
@@ -409,11 +451,11 @@ private slots:
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
-    QApplication::setApplicationName(QStringLiteral("tran-x11-regression"));
+    QApplication::setApplicationName(QStringLiteral("trans-x11-regression"));
     QApplication::setQuitOnLastWindowClosed(false);
     if (app.arguments().contains("--selection-source")) {
         SelectionSource source;
-        source.setWindowTitle(QStringLiteral("Tran Escape test · selection source"));
+        source.setWindowTitle(QStringLiteral("Trans Escape test · selection source"));
         source.resize(440, 80);
         source.setText(QStringLiteral("Hello from an external selection"));
         source.show();

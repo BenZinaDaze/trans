@@ -1,9 +1,11 @@
 #pragma once
 
 #include "settings.h"
+#include "ocr.h"
+#include "screenshot.h"
 #include <QPointer>
 
-namespace Tran {
+namespace Trans {
 
 class TranslationController final : public QObject {
     Q_OBJECT
@@ -18,8 +20,9 @@ class TranslationController final : public QObject {
     Q_PROPERTY(QString status READ status NOTIFY stateChanged)
     Q_PROPERTY(QString message READ message NOTIFY stateChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY stateChanged)
+    Q_PROPERTY(bool sourceIsOcr READ sourceIsOcr NOTIFY stateChanged)
 public:
-    TranslationController(ProviderRegistry &registry, AppSettings &settings, QObject *parent = nullptr);
+    TranslationController(ProviderRegistry &registry, AppSettings &settings, QObject *parent = nullptr, BaiduOcrProvider *ocr = nullptr);
     ~TranslationController() override;
     QString sourceText() const { return m_source; }
     QString translatedText() const { return m_translation; }
@@ -29,20 +32,30 @@ public:
     QString targetLanguage() const { return m_targetLanguage; }
     QString status() const { return m_status; }
     QString message() const { return m_message; }
-    bool busy() const { return m_status == "loading"; }
+    bool sourceIsOcr() const { return m_sourceIsOcr; }
+    bool busy() const { return m_status == "loading" || m_status == "capturing" || m_status == "recognizing"; }
+    void translateScreenshot(ScreenshotJob *job);
     void translateText(const QString &text);
     void selectionError(const QString &message);
     Q_INVOKABLE void retry();
     Q_INVOKABLE void cancel();
 signals:
     void stateChanged();
+    void captureFinished(bool cancelled);
 private:
+    void startTranslation(const QString &text, bool sourceIsOcr);
     void invalidateRequest();
     ProviderRegistry &m_registry;
     AppSettings &m_settings;
     QPointer<TranslationJob> m_job;
+    BaiduOcrProvider m_ocr;
+    BaiduOcrProvider *m_ocrProvider;
+    QPointer<OcrJob> m_ocrJob;
+    QPointer<ScreenshotJob> m_captureJob;
+    QString m_beforeCaptureStatus;
     quint64 m_generation = 0;
     QString m_source;
+    bool m_sourceIsOcr = false;
     QString m_translation;
     QString m_detected;
     QString m_providerId;
@@ -52,4 +65,4 @@ private:
     QString m_message;
 };
 
-} // namespace Tran
+} // namespace Trans

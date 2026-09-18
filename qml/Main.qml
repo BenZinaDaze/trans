@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Tran.Core
+import Trans.Core
 
 ApplicationWindow {
     id: root
@@ -20,7 +20,7 @@ ApplicationWindow {
     readonly property real sizeLimitWidth: Math.max(1, Math.min(720, desktop.popupAvailableSize.width * 0.9))
     readonly property real sizeLimitHeight: Math.max(1, Math.min(900, desktop.popupAvailableSize.height * 0.85))
     readonly property real preferredWidth: Math.ceil(Math.min(sizeLimitWidth,
-        Math.max(360, sourceMeasure.implicitWidth + 66, translationMeasure.implicitWidth + 66)))
+        Math.max(480, sourceMeasure.implicitWidth + 66, translationMeasure.implicitWidth + 66)))
     readonly property real sourceContentHeight: Math.min(Math.max(22, sourceMeasure.implicitHeight),
         180, Math.max(40, sizeLimitHeight * 0.25))
     readonly property real resultContentHeight: controller.status === "success"
@@ -29,7 +29,7 @@ ApplicationWindow {
     // The two budgets include the header, cards, padding, language bar and footer.
     readonly property real compactContentHeight: 198 + sourceContentHeight + resultContentHeight
     readonly property size preferredSize: Qt.size(preferredWidth, Math.ceil(Math.min(sizeLimitHeight,
-        Math.max(260, (compactContentHeight < 400 ? 198 : 278) + sourceContentHeight + resultContentHeight))))
+        Math.max(360, (compactContentHeight < 400 ? 198 : 278) + sourceContentHeight + resultContentHeight))))
     onPreferredSizeChanged: desktop.resizeTranslation(preferredSize)
 
     Text {
@@ -75,11 +75,11 @@ ApplicationWindow {
     }
     Timer { id: copyTimer; interval: 1800; onTriggered: root.copied = false }
 
-    title: "Tran · 选区翻译"
-    width: 360
-    height: 260
-    minimumWidth: Math.min(360, sizeLimitWidth)
-    minimumHeight: Math.min(260, sizeLimitHeight)
+    title: "Trans · 选区翻译"
+    width: 480
+    height: 360
+    minimumWidth: Math.min(480, sizeLimitWidth)
+    minimumHeight: Math.min(360, sizeLimitHeight)
     visible: false
     onVisibleChanged: { if (visible) desktop.resizeTranslation(preferredSize) }
     color: ui.canvas
@@ -107,8 +107,8 @@ ApplicationWindow {
             anchors.rightMargin: 10
             spacing: 9
             UiIcon { name: "language"; color: ui.accent; implicitWidth: 22; implicitHeight: 22 }
-            Label { text: "Tran"; color: ui.text; font.pixelSize: 16; font.weight: Font.DemiBold }
-            Label { text: "划词翻译"; color: ui.muted; font.pixelSize: 12; Layout.fillWidth: true }
+            Label { text: "Trans"; color: ui.text; font.pixelSize: 16; font.weight: Font.DemiBold }
+            Label { text: "选区翻译"; color: ui.muted; font.pixelSize: 12; Layout.fillWidth: true }
             UiButton {
                 symbol: "settings"
                 quiet: true
@@ -237,6 +237,13 @@ ApplicationWindow {
                             }
                         }
                         Label { text: root.providerName; color: ui.text; font.weight: Font.DemiBold; Layout.fillWidth: true }
+                        Label {
+                            objectName: "ocrSourceLabel"
+                            text: "来自 OCR 内容"
+                            visible: root.controller.sourceIsOcr
+                            color: ui.muted
+                            font.pixelSize: 11
+                        }
                         UiButton {
                             objectName: "retryTranslationButton"
                             symbol: "refresh"
@@ -250,7 +257,7 @@ ApplicationWindow {
                         UiButton {
                             objectName: "cancelTranslationButton"
                             symbol: "close"
-                            hint: "取消翻译"
+                            hint: "取消请求"
                             quiet: true
                             implicitHeight: 28
                             implicitWidth: 28
@@ -296,7 +303,7 @@ ApplicationWindow {
                                 implicitHeight: 22
                             }
                             Label {
-                                text: root.controller.busy ? "正在翻译…" : (root.controller.status === "idle" ? "等待选中文字" : (root.controller.status === "cancelled" ? "已取消翻译" : "暂时无法翻译"))
+                                text: root.controller.status === "capturing" ? "正在截图…" : root.controller.status === "recognizing" ? "正在识别文字…" : root.controller.busy ? "正在翻译…" : (root.controller.status === "idle" ? "等待选中文字" : (root.controller.status === "cancelled" ? "已取消请求" : "暂时无法翻译"))
                                 color: ui.text
                                 font.pixelSize: root.compact ? 12 : 14
                                 font.weight: Font.Medium
@@ -304,7 +311,7 @@ ApplicationWindow {
                         }
                         Label {
                             id: stateMessage
-                            text: root.controller.busy ? "正在等待 " + root.providerName + " 返回结果" : (root.controller.message || "在任意应用中选中文字，按快捷键即可查看译文。")
+                            text: root.controller.status === "capturing" ? "请拖动鼠标框选文字，松开识别；Esc 取消。" : root.controller.status === "recognizing" ? "正在等待百度 OCR 返回识别结果" : root.controller.busy ? "正在等待 " + root.providerName + " 返回结果" : (root.controller.message || "在任意应用中选中文字，按快捷键即可查看译文。")
                             textFormat: Text.PlainText
                             color: ui.muted
                             font.pixelSize: 12

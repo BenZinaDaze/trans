@@ -7,7 +7,7 @@
 #include <QSettings>
 #include <QTemporaryFile>
 
-namespace Tran {
+namespace Trans {
 namespace {
 constexpr auto PrivateFile = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
 struct Option { const char *name; const char *key; QVariant value; };
@@ -22,6 +22,9 @@ const QList<Option> &options()
         {"maxInputChars", "translation/maxInputChars", 20000},
         {"maxResponseKiB", "translation/maxResponseKiB", 2048},
         {"shortcut", "desktop/shortcut", "Meta+Shift+T"},
+        {"screenshotShortcut", "desktop/screenshotShortcut", "Meta+Shift+O"},
+        {"ocrApiKey", "ocr/baidu/apiKey", ""},
+        {"ocrSecretKey", "ocr/baidu/secretKey", ""},
         {"fontSize", "window/fontSize", 17}, {"stayOnTop", "window/stayOnTop", true},
         {"restoreFocus", "window/restoreFocus", true}, {"popupPosition", "window/position", "screen"}
     };
@@ -155,6 +158,11 @@ QString AppSettings::validate(const QVariantMap &values) const
     const auto shortcutError = validateShortcut(values.value("shortcut").toString());
     if (!shortcutError.isEmpty())
         return shortcutError;
+    const auto screenshotShortcut = values.value("screenshotShortcut").toString();
+    const auto screenshotError = validateShortcut(screenshotShortcut);
+    if (!screenshotError.isEmpty()) return screenshotError;
+    if (!screenshotShortcut.isEmpty() && QKeySequence(screenshotShortcut) == QKeySequence(values.value("shortcut").toString()))
+        return QStringLiteral("截图翻译与选区翻译不能使用相同的快捷键。");
     const auto configs = values.value("providerConfigs").toMap();
     for (const auto &item : providers()) {
         const auto id = item.toMap().value("id").toString();
@@ -222,4 +230,4 @@ bool AppSettings::save(const QVariantMap &values)
     return true;
 }
 
-} // namespace Tran
+} // namespace Trans

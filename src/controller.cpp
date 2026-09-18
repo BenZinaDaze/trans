@@ -1,9 +1,9 @@
 #include "controller.h"
 
-namespace Tran {
+namespace Trans {
 
-TranslationController::TranslationController(ProviderRegistry &registry, AppSettings &settings, QObject *parent)
-    : QObject(parent), m_registry(registry), m_settings(settings)
+TranslationController::TranslationController(ProviderRegistry &registry, AppSettings &settings, QObject *parent, BaiduOcrProvider *ocr)
+    : QObject(parent), m_registry(registry), m_settings(settings), m_ocrProvider(ocr ? ocr : &m_ocr)
 {
 }
 
@@ -15,6 +15,16 @@ TranslationController::~TranslationController()
 void TranslationController::invalidateRequest()
 {
     ++m_generation;
+    if (m_captureJob) {
+        auto previous = m_captureJob;
+        m_captureJob.clear();
+        previous->cancel();
+    }
+    if (m_ocrJob) {
+        auto previous = m_ocrJob;
+        m_ocrJob.clear();
+        previous->cancel();
+    }
     if (m_job) {
         const auto previous = m_job;
         m_job.clear();
@@ -23,6 +33,11 @@ void TranslationController::invalidateRequest()
 }
 
 void TranslationController::translateText(const QString &text)
+{
+    startTranslation(text, false);
+}
+
+void TranslationController::startTranslation(const QString &text, bool sourceIsOcr)
 {
     // Copy first: retry() passes m_source back into this function.
     const QString input = text.trimmed();
@@ -33,6 +48,7 @@ void TranslationController::translateText(const QString &text)
     m_sourceLanguage = request.sourceLanguage;
     m_targetLanguage = request.targetLanguage;
     m_source = input;
+    m_sourceIsOcr = sourceIsOcr && !input.isEmpty();
     m_translation.clear();
     m_detected.clear();
     m_message.clear();
@@ -40,7 +56,7 @@ void TranslationController::translateText(const QString &text)
     if (input.isEmpty()) {
         m_message = QStringLiteral("请先在其他应用中选中一个词或一句话，再按翻译快捷键。");
     } else if (input.size() > m_settings.maxInputChars()) {
-        m_message = QStringLiteral("选中的文本过长，当前上限为 %1 个字符，可在设置中修改。").arg(m_settings.maxInputChars());
+        m_message = QStringLiteral("输入文本过长，当前上限为 %1 个字符，可在设置中修改。").arg(m_settings.maxInputChars());
     } else if (auto *provider = m_registry.find(m_settings.providerId())) {
         const auto config = m_settings.config(m_settings.providerId());
         m_message = validateConfig(provider->descriptor(), config);
@@ -79,6 +95,7 @@ void TranslationController::selectionError(const QString &message)
     m_sourceLanguage.clear();
     m_targetLanguage.clear();
     m_source.clear();
+    m_sourceIsOcr = false;
     m_translation.clear();
     m_detected.clear();
     m_status = QStringLiteral("error");
@@ -86,16 +103,78 @@ void TranslationController::selectionError(const QString &message)
     emit stateChanged();
 }
 
-void TranslationController::retry() { translateText(m_source); }
+void TranslationController::translateScreenshot(ScreenshotJob *job)
+{
+    const auto previousStatus = m_status == "capturing" ? m_beforeCaptureStatus
+        : (busy() ? QStringLiteral("cancelled") : m_status);
+    invalidateRequest();
+    m_beforeCaptureStatus = previousStatus;
+    m_captureJob = job;
+    m_status = QStringLiteral("capturing");
+    const auto generation = m_generation;
+    const auto values = m_settings.snapshot();
+    const OcrConfig config{values.value("ocrApiKey").toString(), values.value("ocrSecretKey").toString(),
+                           values.value("timeoutSeconds").toInt() * 1000};
+    connect(job, &ScreenshotJob::succeeded, this, [this, generation, config](const QImage &image) {
+        if (generation != m_generation) return;
+        m_captureJob.clear();
+        m_source.clear();
+        m_sourceIsOcr = false;
+        m_translation.clear();
+        m_detected.clear();
+        m_providerId.clear();
+        m_sourceLanguage.clear();
+        m_targetLanguage.clear();
+        m_message.clear();
+        m_status = QStringLiteral("recognizing");
+        m_ocrJob = m_ocrProvider->recognize(image, config, this);
+        connect(m_ocrJob, &OcrJob::succeeded, this, [this, generation](const QString &text) {
+            if (generation != m_generation) return;
+            m_ocrJob.clear();
+            startTranslation(text, true);
+        });
+        connect(m_ocrJob, &OcrJob::failed, this, [this, generation](const TranslationError &error) {
+            if (generation != m_generation) return;
+            m_ocrJob.clear();
+            selectionError(error.message);
+        });
+        emit stateChanged();
+        emit captureFinished(false);
+    });
+    connect(job, &ScreenshotJob::failed, this, [this, generation](const TranslationError &error) {
+        if (generation != m_generation) return;
+        m_captureJob.clear();
+        if (error.code == ErrorCode::Cancelled) {
+            m_status = m_beforeCaptureStatus;
+            emit stateChanged();
+        } else {
+            selectionError(error.message);
+        }
+        emit captureFinished(error.code == ErrorCode::Cancelled);
+    });
+    emit stateChanged();
+}
+
+void TranslationController::retry()
+{
+    if (!busy() && !m_source.isEmpty()) startTranslation(m_source, m_sourceIsOcr);
+}
 
 void TranslationController::cancel()
 {
     if (!busy())
         return;
+    const bool capturing = m_status == "capturing";
     invalidateRequest();
+    if (capturing) {
+        m_status = m_beforeCaptureStatus;
+        emit stateChanged();
+        emit captureFinished(true);
+        return;
+    }
     m_status = QStringLiteral("cancelled");
-    m_message = QStringLiteral("翻译已取消。");
+    m_message = QStringLiteral("请求已取消。");
     emit stateChanged();
 }
 
-} // namespace Tran
+} // namespace Trans

@@ -32,7 +32,7 @@
 #include <QTimer>
 #include <QtTest/qtestwheel.h>
 
-using namespace Tran;
+using namespace Trans;
 
 class MockServer final : public QTcpServer {
 public:
@@ -122,7 +122,7 @@ public:
     QString sequence() const override { return value; }
 };
 
-class TranTest : public QObject {
+class TransTest : public QObject {
     Q_OBJECT
 private slots:
     void trayReopensWithoutTranslating()
@@ -135,7 +135,9 @@ private slots:
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
         TestShortcut shortcut;
-        DesktopBridge desktop(controller, settings, nullptr, &shortcut);
+        TestShortcut screenshotShortcut;
+        screenshotShortcut.value = QStringLiteral("Meta+Shift+O");
+        DesktopBridge desktop(controller, settings, nullptr, &shortcut, &screenshotShortcut);
         QWindow popup;
         QWindow settingsWindow;
         desktop.setWindows(&popup, &settingsWindow);
@@ -227,6 +229,9 @@ private slots:
     {
         QFETCH(bool, dark);
         QFETCH(bool, compact);
+        const auto originalVersion = QCoreApplication::applicationVersion();
+        const auto restoreVersion = qScopeGuard([&] { QCoreApplication::setApplicationVersion(originalVersion); });
+        QCoreApplication::setApplicationVersion(QStringLiteral(TRANS_VERSION));
         const auto originalPalette = QApplication::palette();
         const auto restorePalette = qScopeGuard([&] { QApplication::setPalette(originalPalette); });
         auto palette = originalPalette;
@@ -255,16 +260,16 @@ private slots:
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
             {"controller", QVariant::fromValue(&controller)}, {"desktop", QVariant::fromValue(&desktop)},
             {"providerTools", QVariant::fromValue(&tools)}});
-        engine.load(QUrl::fromLocalFile(QStringLiteral(TRAN_SOURCE_DIR "/qml/Main.qml")));
+        engine.load(QUrl::fromLocalFile(QStringLiteral(TRANS_SOURCE_DIR "/qml/Main.qml")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *popup = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         auto *window = popup->findChild<QQuickWindow *>("settingsWindow");
         QVERIFY(window);
         desktop.setWindows(popup, window);
-        popup->resize(compact ? QSize(360, 300) : QSize(600, 480));
+        popup->resize(compact ? QSize(480, 360) : QSize(600, 480));
         popup->show();
         QTRY_VERIFY(popup->isExposed());
-        const QString previewDirectory = qEnvironmentVariable("TRAN_UI_SCREENSHOT_DIR");
+        const QString previewDirectory = qEnvironmentVariable("TRANS_UI_SCREENSHOT_DIR");
         const auto render = [](QQuickWindow *target) {
             QSignalSpy frame(target, &QQuickWindow::frameSwapped);
             target->update();
@@ -275,7 +280,7 @@ private slots:
             if (target == popup) {
                 QCoreApplication::processEvents();
                 // Exercise constrained layouts as well as the separately tested automatic sizes.
-                target->resize(compact ? QSize(360, 300) : QSize(600, 480));
+                target->resize(compact ? QSize(480, 360) : QSize(600, 480));
             }
             if (!render(target)) return false;
             if (previewDirectory.isEmpty()) return true;
@@ -287,6 +292,9 @@ private slots:
         auto *retry = popup->findChild<QQuickItem *>("retryTranslationButton");
         auto *cancel = popup->findChild<QQuickItem *>("cancelTranslationButton");
         QVERIFY(copy && retry && cancel);
+        QVERIFY(!popup->findChild<QQuickItem *>("screenshotTranslationButton"));
+        auto *ocrSource = popup->findChild<QQuickItem *>("ocrSourceLabel");
+        QVERIFY(ocrSource && !ocrSource->isVisible());
         QVERIFY(!copy->isEnabled());
         QVERIFY(capture(popup, "idle"));
         controller.translateText("The limits of my language mean the limits of my world.");
@@ -335,7 +343,7 @@ private slots:
         QVERIFY(render(window));
         auto *tabs = window->findChild<QObject *>("settingsTabs");
         QVERIFY(tabs);
-        for (int page = 0; page < 3; ++page) {
+        for (int page = 0; page < 4; ++page) {
             QQuickItem *nav = nullptr;
             // Repeater delegates belong to the visual tree, not the QObject ownership tree.
             for (auto *item : qobject_cast<QQuickItem *>(tabs)->childItems()) {
@@ -361,7 +369,7 @@ private slots:
                 QVERIFY(capture(window, "deepseek"));
             }
             auto *settingsPage = window->findChild<QQuickItem *>(
-                QStringList{"providerPage", "translationPage", "desktopPage"}.at(page));
+                QStringList{"providerPage", "translationPage", "desktopPage", "ocrPage"}.at(page));
             QVERIFY(settingsPage);
             auto *flickable = settingsPage->property("contentItem").value<QObject *>();
             QVERIFY(flickable);
@@ -394,7 +402,7 @@ private slots:
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
             {"controller", QVariant::fromValue(&controller)}, {"desktop", QVariant::fromValue(&desktop)},
             {"providerTools", QVariant::fromValue(&tools)}});
-        engine.load(QUrl::fromLocalFile(QStringLiteral(TRAN_SOURCE_DIR "/qml/Main.qml")));
+        engine.load(QUrl::fromLocalFile(QStringLiteral(TRANS_SOURCE_DIR "/qml/Main.qml")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *popup = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         auto *window = popup->findChild<QQuickWindow *>("settingsWindow");
@@ -403,7 +411,7 @@ private slots:
             QSignalSpy frame(popup, &QQuickWindow::frameSwapped);
             popup->update();
             if (!frame.wait(1000)) return false;
-            const auto path = qEnvironmentVariable("TRAN_UI_SCREENSHOT_DIR");
+            const auto path = qEnvironmentVariable("TRANS_UI_SCREENSHOT_DIR");
             if (path.isEmpty()) return true;
             QDir().mkpath(path);
             return popup->grabWindow().save(QDir(path).filePath("auto-" + name + ".png"));
@@ -422,14 +430,14 @@ private slots:
         QTRY_COMPARE(popup->size(), popup->property("preferredSize").toSize());
         QVERIFY(capture("word"));
         const auto small = popup->size();
-        QVERIFY(small.width() <= 420 && small.height() <= 320);
+        QCOMPARE(small, QSize(480, 360));
         auto *text = popup->findChild<QQuickItem *>("translationText");
         auto *resultViewport = viewport(text);
         QVERIFY(resultViewport);
         QVERIFY(resultViewport->property("contentHeight").toReal() <= resultViewport->height() + 1);
 
         controller.translateText("A paragraph should expand the window enough to read comfortably.");
-        manual->jobs.last()->succeed(QStringLiteral("让不同语言的文字变得容易理解，窗口应随内容自动调整。\n").repeated(4));
+        manual->jobs.last()->succeed(QStringLiteral("让不同语言的文字变得容易理解，窗口应随内容自动调整。\n").repeated(8));
         QTRY_COMPARE(popup->size(), popup->property("preferredSize").toSize());
         QVERIFY(capture("paragraph"));
         QVERIFY(popup->width() > small.width());
@@ -493,7 +501,7 @@ private slots:
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
             {"controller", QVariant::fromValue(&controller)}, {"desktop", QVariant::fromValue(&desktop)},
             {"providerTools", QVariant::fromValue(&tools)}});
-        engine.load(QUrl::fromLocalFile(QStringLiteral(TRAN_SOURCE_DIR "/qml/Main.qml")));
+        engine.load(QUrl::fromLocalFile(QStringLiteral(TRANS_SOURCE_DIR "/qml/Main.qml")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *popup = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         auto *window = popup->findChild<QQuickWindow *>("settingsWindow");
@@ -581,7 +589,7 @@ private slots:
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
             {"controller", QVariant::fromValue(&controller)}, {"desktop", QVariant::fromValue(&desktop)},
             {"providerTools", QVariant::fromValue(&tools)}});
-        engine.load(QUrl::fromLocalFile(QStringLiteral(TRAN_SOURCE_DIR "/qml/Main.qml")));
+        engine.load(QUrl::fromLocalFile(QStringLiteral(TRANS_SOURCE_DIR "/qml/Main.qml")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *popup = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         auto *window = popup->findChild<QQuickWindow *>("settingsWindow");
@@ -640,7 +648,9 @@ private slots:
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
         TestShortcut shortcut;
-        DesktopBridge desktop(controller, settings, nullptr, &shortcut);
+        TestShortcut screenshotShortcut;
+        screenshotShortcut.value = QStringLiteral("Meta+Shift+O");
+        DesktopBridge desktop(controller, settings, nullptr, &shortcut, &screenshotShortcut);
         auto draft = settings.snapshot();
         draft["shortcut"] = "Ctrl+Alt+Y";
         shortcut.reject = true;
@@ -654,7 +664,7 @@ private slots:
         blocker.close();
         AppSettings broken(registry, directory.filePath("blocker/settings.ini"));
         TranslationController brokenController(registry, broken);
-        DesktopBridge brokenDesktop(brokenController, broken, nullptr, &shortcut);
+        DesktopBridge brokenDesktop(brokenController, broken, nullptr, &shortcut, &screenshotShortcut);
         QVERIFY(!brokenDesktop.saveSettings(draft));
         QCOMPARE(shortcut.attempts.last(), QStringLiteral("Meta+Shift+T"));
         QCOMPARE(shortcut.value, QStringLiteral("Meta+Shift+T"));
@@ -788,7 +798,7 @@ private slots:
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
             {"controller", QVariant::fromValue(&controller)}, {"desktop", QVariant::fromValue(&desktop)},
             {"providerTools", QVariant::fromValue(&tools)}});
-        engine.load(QUrl::fromLocalFile(QStringLiteral(TRAN_SOURCE_DIR "/qml/Main.qml")));
+        engine.load(QUrl::fromLocalFile(QStringLiteral(TRANS_SOURCE_DIR "/qml/Main.qml")));
         QVERIFY(!engine.rootObjects().isEmpty());
         auto *popup = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         auto *window = popup->findChild<QQuickWindow *>("settingsWindow");
@@ -845,10 +855,29 @@ private slots:
         QTest::keyClick(window, Qt::Key_Y, Qt::ControlModifier | Qt::AltModifier);
         QCOMPARE(desktopPage->property("shortcut").toString(), QStringLiteral("Ctrl+Alt+Y"));
         QVERIFY(!desktopPage->property("recording").toBool());
+        auto *screenshotInput = qobject_cast<QQuickItem *>(field("screenshotShortcutField"));
+        QVERIFY(screenshotInput);
+        QVERIFY(desktopPage->setProperty("recordingScreenshot", true));
+        screenshotInput->forceActiveFocus();
+        QTest::keyClick(window, Qt::Key_O, Qt::ControlModifier | Qt::AltModifier);
+        QCOMPARE(desktopPage->property("screenshotShortcut").toString(), QStringLiteral("Ctrl+Alt+O"));
+        QVERIFY(!desktopPage->property("recordingScreenshot").toBool());
+        QVERIFY(set("ocrApiKeyField", "text", "ocr-key"));
+        QVERIFY(set("ocrSecretKeyField", "text", "ocr-secret"));
         QVariant saved;
         QVERIFY(QMetaObject::invokeMethod(window, "saveAll", Q_RETURN_ARG(QVariant, saved)));
         QVERIFY2(saved.toBool(), qPrintable(desktop.settingsError()));
         const auto expected = settings.snapshot();
+        QCOMPARE(expected.value("ocrApiKey").toString(), QStringLiteral("ocr-key"));
+        QCOMPARE(expected.value("ocrSecretKey").toString(), QStringLiteral("ocr-secret"));
+        QCOMPARE(expected.value("screenshotShortcut").toString(), QStringLiteral("Ctrl+Alt+O"));
+        // Cancelling before Portal starts must restore visibility without discarding drafts.
+        QVERIFY(set("ocrSecretKeyField", "text", "unsaved-ocr-secret"));
+        desktop.TranslateScreenshot();
+        QVERIFY(!window->isVisible());
+        controller.cancel();
+        QVERIFY(window->isVisible());
+        QCOMPARE(field("ocrSecretKeyField")->property("text").toString(), QStringLiteral("unsaved-ocr-secret"));
         QCOMPARE(settings.providerId(), QStringLiteral("deepseek"));
         QCOMPARE(settings.config("openai").apiKey, QStringLiteral("openai-test-key"));
         QCOMPARE(settings.config("openai").model, QStringLiteral("custom-openai-model"));
@@ -868,6 +897,7 @@ private slots:
         QVERIFY(set("apiKeyField", "text", "discarded-key"));
         desktop.closeSettings();
         QCOMPARE(field("apiKeyField")->property("text").toString(), QString());
+        QCOMPARE(field("ocrSecretKeyField")->property("text").toString(), QString());
         desktop.ShowSettings();
         QCOMPARE(field("apiKeyField")->property("text").toString(), QStringLiteral("deepseek-test-key"));
         QVariant collected;
@@ -920,7 +950,7 @@ private slots:
         config.temperature = 0.4;
         config.maxOutputTokens = 1024;
         config.reasoning = "low";
-        config.headersJson = R"({"X-Project":"tran"})";
+        config.headersJson = R"({"X-Project":"trans"})";
         config.optionsJson = R"({"top_p":0.9})";
         TranslationRequest input{"Hello\n世界", "en", "zh-CN"};
         input.systemPrompt = "Translate {{sourceLanguage}} to {{targetLanguage}}. Keep lines.";
@@ -935,7 +965,7 @@ private slots:
         QCOMPARE(request.path, path);
         QCOMPARE(request.headers.value("content-type"), QByteArray("application/json"));
         QCOMPARE(request.headers.value("authorization"), QByteArray("Bearer test-key"));
-        QCOMPARE(request.headers.value("x-project"), QByteArray("tran"));
+        QCOMPARE(request.headers.value("x-project"), QByteArray("trans"));
         QCOMPARE(request.body.value("model").toString(), QStringLiteral("test-model"));
         QCOMPARE(request.body.value("stream").toBool(), false);
         QCOMPARE(request.body.value("temperature").toDouble(), 0.4);
@@ -1091,7 +1121,7 @@ private slots:
     void localSettingsRoundTripAndPermissions()
     {
         QTemporaryDir directory;
-        const QString path = directory.filePath("tran/settings.ini");
+        const QString path = directory.filePath("trans/settings.ini");
         auto registry = ProviderRegistry::builtins();
         QVariantMap expected;
         {
@@ -1225,11 +1255,11 @@ private slots:
         QVERIFY(daemon.waitForReadyRead());
         const auto address = QString::fromUtf8(daemon.readLine()).trimmed();
         QVERIFY(!address.isEmpty());
-        auto primary = QDBusConnection::connectToBus(address, "tran-test-primary");
-        auto secondary = QDBusConnection::connectToBus(address, "tran-test-secondary");
+        auto primary = QDBusConnection::connectToBus(address, "trans-test-primary");
+        auto secondary = QDBusConnection::connectToBus(address, "trans-test-secondary");
         const auto disconnectBus = qScopeGuard([] {
-            QDBusConnection::disconnectFromBus("tran-test-secondary");
-            QDBusConnection::disconnectFromBus("tran-test-primary");
+            QDBusConnection::disconnectFromBus("trans-test-secondary");
+            QDBusConnection::disconnectFromBus("trans-test-primary");
         });
         QVERIFY(primary.isConnected());
         QVERIFY(secondary.isConnected());
@@ -1241,12 +1271,12 @@ private slots:
         QWindow popup;
         QWindow settingsWindow;
         desktop.setWindows(&popup, &settingsWindow);
-        const auto service = QStringLiteral("io.github.tran.Tran");
-        QVERIFY(primary.registerObject("/Tran", &desktop, QDBusConnection::ExportScriptableInvokables));
+        const auto service = QStringLiteral("io.github.trans.Trans");
+        QVERIFY(primary.registerObject("/Trans", &desktop, QDBusConnection::ExportScriptableInvokables));
         QVERIFY(primary.registerService(service));
         QVERIFY(!secondary.registerService(service));
 
-        auto message = QDBusMessage::createMethodCall(service, "/Tran", service, "ShowSettings");
+        auto message = QDBusMessage::createMethodCall(service, "/Trans", service, "ShowSettings");
         QDBusPendingCallWatcher showCall(secondary.asyncCall(message));
         QTRY_VERIFY(showCall.isFinished());
         QVERIFY(!QDBusPendingReply<>(showCall).isError());
@@ -1254,7 +1284,7 @@ private slots:
         desktop.closeSettings();
         QVERIFY(!settingsWindow.isVisible());
 
-        message = QDBusMessage::createMethodCall(service, "/Tran", service, "ShowTranslation");
+        message = QDBusMessage::createMethodCall(service, "/Trans", service, "ShowTranslation");
         QDBusPendingCallWatcher openCall(secondary.asyncCall(message));
         QTRY_VERIFY(openCall.isFinished());
         QVERIFY(!QDBusPendingReply<>(openCall).isError());
@@ -1262,7 +1292,7 @@ private slots:
         QCOMPARE(controller.status(), QStringLiteral("idle"));
         desktop.closeTranslation();
 
-        message = QDBusMessage::createMethodCall(service, "/Tran", service, "TranslateSelection");
+        message = QDBusMessage::createMethodCall(service, "/Trans", service, "TranslateSelection");
         QDBusPendingCallWatcher translateCall(secondary.asyncCall(message));
         QTRY_VERIFY(translateCall.isFinished());
         QVERIFY(!QDBusPendingReply<>(translateCall).isError());
@@ -1273,5 +1303,5 @@ private slots:
     }
 };
 
-QTEST_MAIN(TranTest)
-#include "test_tran.moc"
+QTEST_MAIN(TransTest)
+#include "test_trans.moc"

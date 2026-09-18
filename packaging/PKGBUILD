@@ -1,6 +1,6 @@
 # Generated values are filled from the archived commit by prepare.py.
 # shellcheck disable=SC2034
-pkgname=tran
+pkgname=trans
 pkgver=@VERSION@
 pkgrel=1
 pkgdesc='Selection translator for KDE Plasma X11 (Qt 6)'
@@ -12,25 +12,27 @@ depends=('gcc-libs' 'glibc' 'qt6-base' 'qt6-declarative' 'qt6-svg'
          'kglobalaccel' 'kwindowsystem' 'ca-certificates' 'hicolor-icon-theme')
 makedepends=('cmake' 'ninja')
 checkdepends=('dbus' 'desktop-file-utils' 'ttf-dejavu' 'noto-fonts-cjk')
-optdepends=('noto-fonts-cjk: Chinese interface and CJK translation text')
+optdepends=('noto-fonts-cjk: Chinese interface and CJK translation text'
+            'xdg-desktop-portal: Future Wayland region screenshot backend'
+            'xdg-desktop-portal-kde: KDE Portal backend (region support required)')
 options=('!debug' '!lto')
-source=("tran-${pkgver}.tar.gz")
+source=("trans-${pkgver}.tar.gz")
 sha256sums=('@SOURCE_SHA256@')
 
 build() {
-    cmake -S "$srcdir/tran-$pkgver" -B build -G Ninja \
+    cmake -S "$srcdir/trans-$pkgver" -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr \
         -DCMAKE_PREFIX_PATH=/usr \
         -DBUILD_TESTING=ON \
-        -DTRAN_X11_TESTS=OFF
+        -DTRANS_X11_TESTS=OFF
     cmake --build build --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
-    cmake --build build --target tran_qmllint
+    cmake --build build --target trans_qmllint
 }
 
 check() {
     ctest --test-dir build --output-on-failure
-    desktop-file-validate "$srcdir/tran-$pkgver/data/io.github.tran.Tran.desktop"
+    desktop-file-validate "$srcdir/trans-$pkgver/data/io.github.trans.Trans.desktop"
 }
 
 package() {

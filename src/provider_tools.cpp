@@ -4,7 +4,7 @@
 #include <QJsonDocument>
 #include <QNetworkReply>
 
-namespace Tran {
+namespace Trans {
 
 ProviderTools::ProviderTools(ProviderRegistry &registry, QObject *parent) : QObject(parent), m_registry(registry)
 {
@@ -122,4 +122,4 @@ void ProviderTools::testTranslation(const QString &id, const QVariantMap &snapsh
     emit changed();
 }
 
-} // namespace Tran
+} // namespace Trans

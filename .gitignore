@@ -3,3 +3,4 @@
 *.user
 __pycache__/
 /dist/
+docs/OCR.pdf

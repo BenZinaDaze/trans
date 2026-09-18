@@ -2,7 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Tran.Core
+import Trans.Core
 
 ApplicationWindow {
     id: root
@@ -13,7 +13,7 @@ ApplicationWindow {
     property string feedback: ""
     property bool saved: false
 
-    title: "Tran · 配置中心"
+    title: "Trans · 配置中心"
     width: 940
     height: 740
     minimumWidth: 500
@@ -27,6 +27,7 @@ ApplicationWindow {
         providerPage.load(draft.providerConfigs, draft.providerId)
         translationPage.load(draft)
         desktopPage.load(draft)
+        ocrPage.load(draft)
         saved = false
         feedback = appSettings.lastError
     }
@@ -36,6 +37,7 @@ ApplicationWindow {
         draft.providerId = providerPage.editingProvider
         translationPage.write(draft)
         desktopPage.write(draft)
+        ocrPage.write(draft)
         return draft
     }
     function saveAll() {
@@ -44,13 +46,16 @@ ApplicationWindow {
         return saved
     }
     onVisibleChanged: {
+        if (desktop.captureActive) return
         if (visible) {
             reload()
         } else {
             providerTools.clear()
             providerPage.forget()
+            ocrPage.forget()
             draft = ({})
             desktopPage.recording = false
+            desktopPage.recordingScreenshot = false
         }
     }
     onClosing: function(close) {
@@ -60,7 +65,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Escape"
         context: Qt.WindowShortcut
-        enabled: root.visible && !desktopPage.recording
+        enabled: root.visible && !desktopPage.recording && !desktopPage.recordingScreenshot
         onActivated: root.desktop.closeSettings()
     }
 
@@ -110,7 +115,7 @@ ApplicationWindow {
                         color: ui.accentSoft
                         UiIcon { anchors.centerIn: parent; name: "language"; color: ui.accent; implicitWidth: 22; implicitHeight: 22 }
                     }
-                    Label { visible: !root.narrow; text: "Tran"; color: ui.text; font.pixelSize: 23; font.weight: Font.DemiBold }
+                    Label { visible: !root.narrow; text: "Trans"; color: ui.text; font.pixelSize: 23; font.weight: Font.DemiBold }
                 }
                 Label {
                     visible: !root.narrow
@@ -121,7 +126,7 @@ ApplicationWindow {
                     Layout.bottomMargin: 4
                 }
                 Repeater {
-                    model: [ { name: "翻译服务", icon: "service" }, { name: "翻译偏好", icon: "language" }, { name: "快捷键与窗口", icon: "window" } ]
+                    model: [ { name: "翻译服务", icon: "service" }, { name: "翻译偏好", icon: "language" }, { name: "快捷键与窗口", icon: "window" }, { name: "截图 OCR", icon: "window" } ]
                     delegate: Button {
                         id: navButton
                         required property var modelData
@@ -157,7 +162,7 @@ ApplicationWindow {
                     }
                 }
                 Item { Layout.fillHeight: true }
-                Label { visible: !root.narrow; text: "Tran  /  " + Qt.application.version; color: ui.muted; font.pixelSize: 11; Layout.leftMargin: 10; Layout.bottomMargin: 6 }
+                Label { visible: !root.narrow; text: "Trans  /  " + Qt.application.version; color: ui.muted; font.pixelSize: 11; Layout.leftMargin: 10; Layout.bottomMargin: 6 }
             }
         }
         ColumnLayout {
@@ -170,13 +175,13 @@ ApplicationWindow {
                 Layout.bottomMargin: 20
                 spacing: 6
                 Label {
-                    text: ["翻译服务", "翻译偏好", "快捷键与窗口"][tabs.currentIndex]
+                    text: ["翻译服务", "翻译偏好", "快捷键与窗口", "截图 OCR"][tabs.currentIndex]
                     color: ui.text
                     font.pixelSize: 24
                     font.weight: Font.DemiBold
                 }
                 Label {
-                    text: ["连接常用模型，选择适合你的翻译服务。", "设置语言、提示词与翻译请求偏好。", "让翻译融入你的桌面工作方式。"][tabs.currentIndex]
+                    text: ["连接常用模型，选择适合你的翻译服务。", "设置语言、提示词与翻译请求偏好。", "让翻译融入你的桌面工作方式。", "识别图片文字，自动翻译截图内容。"][tabs.currentIndex]
                     color: ui.muted
                     font.pixelSize: 12
                     Layout.fillWidth: true
@@ -208,6 +213,7 @@ ApplicationWindow {
                     objectName: "desktopPage"
                     desktop: root.desktop
                 }
+                OcrPage { id: ocrPage; objectName: "ocrPage" }
             }
             Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: ui.line }
             Pane {
@@ -244,7 +250,7 @@ ApplicationWindow {
                             symbol: "check"
                             objectName: "saveAllButton"
                             highlighted: true
-                            enabled: !desktopPage.recording
+                            enabled: !desktopPage.recording && !desktopPage.recordingScreenshot
                             onClicked: root.saveAll()
                         }
                     }

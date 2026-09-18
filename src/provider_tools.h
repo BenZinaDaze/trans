@@ -6,7 +6,7 @@
 
 class QNetworkReply;
 
-namespace Tran {
+namespace Trans {
 
 class ProviderTools final : public QObject {
     Q_OBJECT
@@ -42,4 +42,4 @@ private:
     QStringList m_models;
 };
 
-} // namespace Tran
+} // namespace Trans

@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Tran.Core
+import Trans.Core
 
 UiScrollView {
     id: root
@@ -89,7 +89,7 @@ UiScrollView {
         UiSection {
             Layout.fillWidth: true
             title: "服务连接"
-            description: "每家服务独立保存配置，当前选择用于划词翻译。"
+            description: "每家服务独立保存配置，当前选择用于选区翻译和截图翻译。"
             Label { text: "当前提供商"; color: ui.muted; font.pixelSize: 12 }
             UiCombo {
                 id: provider

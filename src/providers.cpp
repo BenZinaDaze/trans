@@ -6,7 +6,7 @@
 #include <QPointer>
 #include <QTimer>
 
-namespace Tran {
+namespace Trans {
 
 QNetworkRequest providerNetworkRequest(const ProviderConfig &config, const QString &suffix)
 {
@@ -245,4 +245,4 @@ ProviderRegistry ProviderRegistry::builtins()
     return registry;
 }
 
-} // namespace Tran
+} // namespace Trans

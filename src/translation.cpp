@@ -5,7 +5,7 @@
 #include <QUrl>
 #include <cmath>
 
-namespace Tran {
+namespace Trans {
 
 QVariantMap ProviderDescriptor::toVariant() const
 {
@@ -100,4 +100,4 @@ QString validateConfig(const ProviderDescriptor &descriptor, const ProviderConfi
     return {};
 }
 
-} // namespace Tran
+} // namespace Trans

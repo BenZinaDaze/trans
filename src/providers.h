@@ -6,7 +6,7 @@
 #include <memory>
 #include <vector>
 
-namespace Tran {
+namespace Trans {
 
 enum class HttpProtocol { OpenAI, DeepSeek };
 QNetworkRequest providerNetworkRequest(const ProviderConfig &config, const QString &suffix);
@@ -32,4 +32,4 @@ private:
     std::vector<std::unique_ptr<TranslationProvider>> m_providers;
 };
 
-} // namespace Tran
+} // namespace Trans

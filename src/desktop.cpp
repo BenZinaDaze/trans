@@ -1,4 +1,5 @@
 #include "desktop.h"
+#include "region_capture.h"
 
 #include <KGlobalAccel>
 #include <KWindowSystem>
@@ -12,7 +13,7 @@
 #include <QSystemTrayIcon>
 #include <QTimer>
 
-namespace Tran {
+namespace Trans {
 
 SelectionResult X11SelectionReader::read() const
 {
@@ -23,10 +24,11 @@ SelectionResult X11SelectionReader::read() const
     return {clipboard->text(QClipboard::Selection), {}};
 }
 
-ShortcutService::ShortcutService(QObject *parent) : QObject(parent), m_action(this)
+ShortcutService::ShortcutService(QObject *parent, const QString &actionId, const QString &label, const QString &defaultSequence)
+    : QObject(parent), m_action(this), m_defaultSequence(defaultSequence)
 {
-    m_action.setObjectName(QStringLiteral("translate-selection"));
-    m_action.setText(QStringLiteral("翻译选中文本"));
+    m_action.setObjectName(actionId);
+    m_action.setText(label);
     connect(&m_action, &QAction::triggered, this, &ShortcutService::triggered);
 }
 
@@ -45,7 +47,7 @@ void ShortcutService::initialize(const QString &requested)
             emit changed();
         }
     });
-    const QList<QKeySequence> defaults{QKeySequence(QStringLiteral("Meta+Shift+T"))};
+    const QList<QKeySequence> defaults{QKeySequence(m_defaultSequence)};
     accelerator->setDefaultShortcut(&m_action, defaults);
     accelerator->setShortcut(&m_action, defaults, KGlobalAccel::Autoloading);
     const auto keys = accelerator->shortcut(&m_action);
@@ -169,13 +171,22 @@ void PopupPresenter::close(QWindow *window, QWindow *other, bool restoreFocus)
     }
 }
 
-DesktopBridge::DesktopBridge(TranslationController &controller, AppSettings &settings, QObject *parent, ShortcutService *shortcut)
+DesktopBridge::DesktopBridge(TranslationController &controller, AppSettings &settings, QObject *parent, ShortcutService *shortcut, ShortcutService *screenshotShortcut)
     : QObject(parent), m_controller(controller), m_settings(settings),
       m_ownedShortcut(shortcut ? nullptr : std::make_unique<ShortcutService>()),
-      m_shortcut(shortcut ? shortcut : m_ownedShortcut.get())
+      m_shortcut(shortcut ? shortcut : m_ownedShortcut.get()),
+      m_ownedScreenshotShortcut(screenshotShortcut ? nullptr : std::make_unique<ShortcutService>(nullptr,
+          QStringLiteral("translate-screenshot"), QStringLiteral("截图翻译"), QStringLiteral("Meta+Shift+O"))),
+      m_screenshotShortcut(screenshotShortcut ? screenshotShortcut : m_ownedScreenshotShortcut.get())
 {
     connect(m_shortcut, &ShortcutService::triggered, this, &DesktopBridge::TranslateSelection);
     connect(m_shortcut, &ShortcutService::changed, this, &DesktopBridge::shortcutChanged);
+    connect(m_screenshotShortcut, &ShortcutService::triggered, this, &DesktopBridge::TranslateScreenshot);
+    connect(m_screenshotShortcut, &ShortcutService::changed, this, &DesktopBridge::shortcutChanged);
+    connect(&m_controller, &TranslationController::captureFinished, this, [this](bool cancelled) {
+        restoreCaptureWindows();
+        if (!cancelled) showTranslationWindow();
+    });
 }
 
 DesktopBridge::~DesktopBridge() = default;
@@ -270,23 +281,25 @@ bool DesktopBridge::eventFilter(QObject *watched, QEvent *event)
 void DesktopBridge::initialize()
 {
     m_shortcut->initialize(m_settings.shortcut());
+    m_screenshotShortcut->initialize(m_settings.snapshot().value("screenshotShortcut").toString());
     m_menu = std::make_unique<QMenu>();
     auto *openAction = m_menu->addAction(QStringLiteral("打开翻译窗口"), this, &DesktopBridge::ShowTranslation);
     m_menu->setDefaultAction(openAction);
-    m_menu->addAction(QStringLiteral("翻译选中文本"), this, &DesktopBridge::TranslateSelection);
+    m_menu->addAction(QStringLiteral("选区翻译"), this, &DesktopBridge::TranslateSelection);
+    m_menu->addAction(QStringLiteral("截图翻译"), this, &DesktopBridge::TranslateScreenshot);
     m_menu->addAction(QStringLiteral("设置…"), this, &DesktopBridge::ShowSettings);
     m_menu->addSeparator();
-    m_menu->addAction(QStringLiteral("退出 Tran"), qApp, &QCoreApplication::quit);
+    m_menu->addAction(QStringLiteral("退出 Trans"), qApp, &QCoreApplication::quit);
     m_tray = std::make_unique<QSystemTrayIcon>(QGuiApplication::windowIcon(), this);
-    m_tray->setToolTip(QStringLiteral("Tran · 点击查看翻译"));
+    m_tray->setToolTip(QStringLiteral("Trans · 点击查看翻译"));
     m_tray->setContextMenu(m_menu.get());
     connect(m_tray.get(), &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger)
             ShowTranslation();
     });
     m_tray->show();
-    if (!m_shortcut->error().isEmpty())
-        m_tray->showMessage(QStringLiteral("Tran"), m_shortcut->error(), QSystemTrayIcon::Warning);
+    if (!shortcutError().isEmpty())
+        m_tray->showMessage(QStringLiteral("Trans"), shortcutError(), QSystemTrayIcon::Warning);
 }
 
 void DesktopBridge::showTranslationWindow()
@@ -306,6 +319,7 @@ void DesktopBridge::showTranslationWindow()
 
 void DesktopBridge::ShowTranslation()
 {
+    if (m_controller.status() == "capturing") return;
     // Reopening is a view operation: keep the current result (or request state),
     // without reading PRIMARY or issuing another paid translation request.
     m_presenter.rememberSource(m_popup, m_settingsWindow);
@@ -314,9 +328,10 @@ void DesktopBridge::ShowTranslation()
 
 void DesktopBridge::TranslateSelection()
 {
-    m_presenter.rememberSource(m_popup, m_settingsWindow);
+    if (!m_captureHidden) m_presenter.rememberSource(m_popup, m_settingsWindow);
     // Read PRIMARY before showing a window or changing keyboard focus.
     const auto selection = m_selection.read();
+    restoreCaptureWindows();
     if (selection.error.isEmpty())
         m_controller.translateText(selection.text);
     else
@@ -324,8 +339,39 @@ void DesktopBridge::TranslateSelection()
     showTranslationWindow();
 }
 
+void DesktopBridge::restoreCaptureWindows()
+{
+    if (!m_captureHidden) return;
+    if (m_popupWasVisible && m_popup) m_popup->show();
+    if (m_settingsWasVisible && m_settingsWindow) m_settingsWindow->show();
+    m_captureHidden = false;
+    emit captureVisibilityChanged();
+}
+
+void DesktopBridge::TranslateScreenshot()
+{
+    const auto config = m_settings.snapshot();
+    if (config.value("ocrApiKey").toString().trimmed().isEmpty() || config.value("ocrSecretKey").toString().trimmed().isEmpty()) {
+        restoreCaptureWindows();
+        m_controller.selectionError(QStringLiteral("请在设置 → 截图 OCR 中填写百度 API Key 和 Secret Key。"));
+        showTranslationWindow();
+        return;
+    }
+    if (!m_captureHidden) {
+        m_presenter.rememberSource(m_popup, m_settingsWindow);
+        m_popupWasVisible = m_popup && m_popup->isVisible();
+        m_settingsWasVisible = m_settingsWindow && m_settingsWindow->isVisible();
+        m_captureHidden = true;
+        emit captureVisibilityChanged();
+    }
+    if (m_popup) m_popup->hide();
+    if (m_settingsWindow) m_settingsWindow->hide();
+    m_controller.translateScreenshot(createScreenshotJob(&m_controller));
+}
+
 void DesktopBridge::ShowSettings()
 {
+    if (m_controller.status() == "capturing") m_controller.cancel();
     m_presenter.rememberSource(m_popup, m_settingsWindow);
     if (m_settingsWindow)
         m_presenter.show(m_settingsWindow, m_settingsWindow->size());
@@ -352,17 +398,32 @@ bool DesktopBridge::saveSettings(const QVariantMap &values)
         emit settingsErrorChanged();
         return false;
     }
-    const auto previous = m_shortcut->sequence();
-    const auto desired = values.value("shortcut").toString();
-    const bool shortcutChanged = desired != previous;
-    if (shortcutChanged && !m_shortcut->apply(desired)) {
-        m_settingsError = m_shortcut->error().isEmpty() ? QStringLiteral("快捷键应用失败，设置未保存。") : m_shortcut->error();
+    const QString previous = m_shortcut->sequence();
+    const QString previousScreenshot = m_screenshotShortcut->sequence();
+    const QString desired = values.value("shortcut").toString();
+    const QString desiredScreenshot = values.value("screenshotShortcut").toString();
+    const bool changed = desired != previous;
+    const bool screenshotChanged = desiredScreenshot != previousScreenshot;
+    auto rollback = [&] {
+        // Release both actions before restoring, allowing the user to swap bindings.
+        if (changed) m_shortcut->apply({});
+        if (screenshotChanged) m_screenshotShortcut->apply({});
+        if (changed) m_shortcut->apply(previous);
+        if (screenshotChanged) m_screenshotShortcut->apply(previousScreenshot);
+    };
+    bool applied = true;
+    if (changed) applied = m_shortcut->apply({});
+    if (applied && screenshotChanged) applied = m_screenshotShortcut->apply({});
+    if (applied && changed) applied = m_shortcut->apply(desired);
+    if (applied && screenshotChanged) applied = m_screenshotShortcut->apply(desiredScreenshot);
+    if (!applied) {
+        m_settingsError = shortcutError().isEmpty() ? QStringLiteral("快捷键应用失败，设置未保存。") : shortcutError();
+        rollback();
         emit settingsErrorChanged();
         return false;
     }
     if (!m_settings.save(values)) {
-        if (shortcutChanged)
-            m_shortcut->apply(previous);
+        rollback();
         m_settingsError = m_settings.lastError();
         emit settingsErrorChanged();
         return false;
@@ -379,4 +440,4 @@ QString DesktopBridge::shortcutForKey(int key, int modifiers) const
     return validateShortcut(sequence).isEmpty() ? sequence : QString();
 }
 
-} // namespace Tran
+} // namespace Trans

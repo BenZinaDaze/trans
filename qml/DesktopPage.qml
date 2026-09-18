@@ -1,17 +1,21 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Tran.Core
+import Trans.Core
 
 UiScrollView {
     id: root
     required property DesktopBridge desktop
     property bool recording: false
+    property bool recordingScreenshot: false
+    property string screenshotShortcut: "Meta+Shift+O"
     property string shortcut: "Meta+Shift+T"
     contentWidth: availableWidth
     clip: true
     function load(values) {
         shortcut = values.shortcut
+        screenshotShortcut = values.screenshotShortcut
+        recordingScreenshot = false
         recording = false
         popupPosition.currentIndex = values.popupPosition === "cursor" ? 1 : 0
         fontSize.value = values.fontSize
@@ -20,6 +24,7 @@ UiScrollView {
     }
     function write(values) {
         values.shortcut = shortcut
+        values.screenshotShortcut = screenshotShortcut
         values.popupPosition = popupPosition.currentIndex === 1 ? "cursor" : "screen"
         values.fontSize = fontSize.value
         values.stayOnTop = stayOnTop.checked
@@ -31,7 +36,7 @@ UiScrollView {
         spacing: 16
         UiSection {
             Layout.fillWidth: true
-            title: "全局快捷键"
+            title: "选区翻译快捷键"
             description: "选中一个词或一句话，随时呼出翻译窗口。"
             RowLayout {
                 Layout.fillWidth: true
@@ -74,6 +79,48 @@ UiScrollView {
             Label { text: "组合键需包含 Ctrl、Alt 或 Meta。按 Esc 取消录制。"; font.pixelSize: 11; color: ui.muted; Layout.fillWidth: true; wrapMode: Text.Wrap }
             UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; onClicked: root.shortcut = "Meta+Shift+T" }
             Label { text: root.desktop.shortcutError; color: ui.danger; font.pixelSize: 12; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.Wrap }
+        }
+        UiSection {
+            Layout.fillWidth: true
+            title: "截图翻译快捷键"
+            description: "鼠标拖动框选文字，松开后自动识别并翻译。"
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                UiField {
+                    id: screenshotShortcutField
+                    objectName: "screenshotShortcutField"
+                    Layout.fillWidth: true
+                    text: root.recordingScreenshot ? "请按下快捷键…" : root.screenshotShortcut
+                    placeholderText: "已禁用截图快捷键"
+                    readOnly: true
+                    Keys.onPressed: function(event) {
+                        if (!root.recordingScreenshot) return
+                        event.accepted = true
+                        if (event.key === Qt.Key_Escape) {
+                            root.recordingScreenshot = false
+                        } else {
+                            const sequence = root.desktop.shortcutForKey(event.key, event.modifiers)
+                            if (sequence.length > 0) {
+                                root.screenshotShortcut = sequence
+                                root.recordingScreenshot = false
+                            }
+                        }
+                    }
+                    onActiveFocusChanged: { if (!activeFocus) root.recordingScreenshot = false }
+                }
+                UiButton {
+                    text: root.recordingScreenshot ? "取消" : "录制"
+                    highlighted: root.recordingScreenshot
+                    objectName: "recordScreenshotShortcutButton"
+                    onClicked: {
+                        root.recordingScreenshot = !root.recordingScreenshot
+                        if (root.recordingScreenshot) screenshotShortcutField.forceActiveFocus()
+                    }
+                }
+                UiButton { text: "清空"; quiet: true; onClicked: { root.screenshotShortcut = ""; root.recordingScreenshot = false } }
+            }
+            UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; onClicked: root.screenshotShortcut = "Meta+Shift+O" }
         }
         UiSection {
             Layout.fillWidth: true
