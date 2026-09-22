@@ -236,8 +236,10 @@ if(BUILD_TESTING)
   set_tests_properties(
     trans_core trans_ocr trans_qml_smoke
     PROPERTIES ENVIRONMENT
-               "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software" TIMEOUT 30)
+               "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Fusion" TIMEOUT 30)
   if(WIN32)
+    set_property(TEST trans_core trans_ocr trans_qml_smoke APPEND PROPERTY
+                 ENVIRONMENT "QT_QPA_FONTDIR=$ENV{WINDIR}/Fonts")
     qt_add_executable(trans_windows_instance_tests
                       tests/test_windows_instance.cpp)
     target_link_libraries(trans_windows_instance_tests

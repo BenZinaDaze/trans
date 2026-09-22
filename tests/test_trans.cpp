@@ -696,10 +696,11 @@ private slots:
         popup->show();
         desktop.ShowSettings();
         popup->requestActivate();
-        QTRY_VERIFY(popup->isActive());
+        QTRY_COMPARE(QGuiApplication::focusWindow(), popup);
         auto *text = popup->findChild<QQuickItem *>("translationText");
         QVERIFY(text);
         text->forceActiveFocus();
+        QTRY_VERIFY(text->hasActiveFocus());
         QTest::keyClick(popup, Qt::Key_Escape);
         QTRY_VERIFY_WITH_TIMEOUT(!popup->isVisible(), 1000);
         QVERIFY(window->isVisible());
@@ -709,7 +710,8 @@ private slots:
         auto *pending = manual->jobs.last();
         popup->show();
         window->requestActivate();
-        QTRY_VERIFY(window->isActive());
+        // isActive() also includes transient relatives; wait for the actual keyboard target.
+        QTRY_COMPARE(QGuiApplication::focusWindow(), window);
         auto *tabs = window->findChild<QObject *>("settingsTabs");
         auto *desktopPage = window->findChild<QObject *>("desktopPage");
         auto *shortcutInput = window->findChild<QQuickItem *>("shortcutField");
@@ -717,6 +719,7 @@ private slots:
         tabs->setProperty("currentIndex", 2);
         desktopPage->setProperty("recording", true);
         shortcutInput->forceActiveFocus();
+        QTRY_VERIFY(shortcutInput->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Escape);
         QVERIFY(!desktopPage->property("recording").toBool());
         QVERIFY(window->isVisible());
@@ -727,7 +730,7 @@ private slots:
         QVERIFY(popup->isVisible());
         QVERIFY(!pending->cancelled);
         popup->requestActivate();
-        QTRY_VERIFY(popup->isActive());
+        QTRY_COMPARE(QGuiApplication::focusWindow(), popup);
         QTest::keyClick(popup, Qt::Key_Escape);
         QTRY_VERIFY_WITH_TIMEOUT(!popup->isVisible(), 1000);
         QVERIFY(pending->cancelled);

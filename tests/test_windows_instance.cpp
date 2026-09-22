@@ -159,6 +159,7 @@ public:
     {
         return QTest::qWaitFor([&] {
             output += process.readAllStandardOutput();
+            output.replace("\r\n", "\n");
             return output.contains(marker + '\n');
         }, 5000);
     }

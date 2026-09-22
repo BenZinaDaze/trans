@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QKeySequence>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QTemporaryFile>
 #include "platform/settings_storage.h"
@@ -193,12 +194,19 @@ bool AppSettings::persist(const QVariantMap &values)
     QString storageError;
     if (!prepareSettingsDirectory(directory, &storageError))
         return setError(storageError);
-    QTemporaryFile temporary(directory + "/.settings-XXXXXX.ini");
-    if (!temporary.open())
-        return setError(QStringLiteral("无法创建临时配置文件。"));
-    temporary.close();
+    QString temporaryPath;
     {
-        QSettings output(temporary.fileName(), QSettings::IniFormat);
+        QTemporaryFile temporary(directory + "/.settings-XXXXXX.ini");
+        if (!temporary.open())
+            return setError(QStringLiteral("无法创建临时配置文件。"));
+        temporaryPath = temporary.fileName();
+        temporary.setAutoRemove(false);
+        // close() retains a native handle without delete sharing on Windows.
+        // Destroy the QTemporaryFile before QSettings atomically replaces it.
+    }
+    const auto cleanup = qScopeGuard([&] { QFile::remove(temporaryPath); });
+    {
+        QSettings output(temporaryPath, QSettings::IniFormat);
         output.setFallbacksEnabled(false);
         for (const auto &option : options())
             output.setValue(option.key, values.value(option.name));
@@ -213,7 +221,7 @@ bool AppSettings::persist(const QVariantMap &values)
         if (output.status() != QSettings::NoError)
             return setError(QStringLiteral("配置文件写入失败。"));
     }
-    QFile source(temporary.fileName());
+    QFile source(temporaryPath);
     if (!source.open(QIODevice::ReadOnly))
         return setError(QStringLiteral("无法读取临时配置文件。"));
     if (!writePrivateSettings(m_path, source.readAll(), &storageError))
