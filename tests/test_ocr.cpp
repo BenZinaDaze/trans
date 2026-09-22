@@ -3,12 +3,16 @@
 #include "ocr.h"
 #include "screenshot.h"
 #include "region_capture.h"
+#ifdef Q_OS_LINUX
 #include "platform/linux/portal_screenshot.h"
+#endif
 #include "platform/screenshot_service.h"
 #include "platform/platform_services.h"
+#ifdef Q_OS_LINUX
 #include <QDBusContext>
 #include <QDBusMessage>
 #include <QDBusObjectPath>
+#endif
 #include <QFile>
 #include <QGuiApplication>
 #include <QJsonDocument>
@@ -121,6 +125,7 @@ public:
     QString unavailableReason() const override { return {}; }
 };
 
+#ifdef Q_OS_LINUX
 // Real D-Bus messages on a private bus exercise response subscription and cancellation.
 class Portal : public QObject, protected QDBusContext {
     Q_OBJECT
@@ -166,6 +171,7 @@ public:
 public slots:
     void Close() { closed = true; }
 };
+#endif
 
 class OcrTest : public QObject {
     Q_OBJECT
@@ -420,7 +426,7 @@ private slots:
     void unsupportedDisplayDoesNotUsePortal()
     {
         const auto platform = QGuiApplication::platformName();
-        if (platform == "xcb" || platform == "wayland" || platform == "wayland-egl")
+        if (platform == "xcb" || platform == "wayland" || platform == "wayland-egl" || platform == "windows")
             QSKIP("This case requires an unsupported display plugin, such as offscreen.");
         std::unique_ptr<ScreenshotService> service(createScreenshotService());
         QCOMPARE(service->availability(), CapabilityState::Unsupported);
@@ -441,6 +447,7 @@ private slots:
         QTRY_VERIFY(job.isNull());
         QCOMPARE(cancelled.size(), 1);
     }
+#ifdef Q_OS_LINUX
     void portalResponses()
     {
         QTemporaryDir directory;
@@ -526,6 +533,7 @@ private slots:
         daemon.terminate();
         QVERIFY(daemon.waitForFinished(2000));
     }
+    #endif
 };
 QTEST_MAIN(OcrTest)
 #include "test_ocr.moc"

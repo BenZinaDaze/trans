@@ -3,13 +3,19 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QKeySequence>
-#include <QSaveFile>
 #include <QSettings>
 #include <QTemporaryFile>
+#include "platform/settings_storage.h"
 
 namespace Trans {
 namespace {
-constexpr auto PrivateFile = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+#ifdef Q_OS_WIN
+constexpr auto SelectionShortcut = "Ctrl+Alt+T";
+constexpr auto ScreenshotShortcut = "Ctrl+Alt+O";
+#else
+constexpr auto SelectionShortcut = "Meta+Shift+T";
+constexpr auto ScreenshotShortcut = "Meta+Shift+O";
+#endif
 struct Option { const char *name; const char *key; QVariant value; };
 const QList<Option> &options()
 {
@@ -21,8 +27,8 @@ const QList<Option> &options()
         {"timeoutSeconds", "translation/timeoutSeconds", 30},
         {"maxInputChars", "translation/maxInputChars", 20000},
         {"maxResponseKiB", "translation/maxResponseKiB", 2048},
-        {"shortcut", "desktop/shortcut", "Meta+Shift+T"},
-        {"screenshotShortcut", "desktop/screenshotShortcut", "Meta+Shift+O"},
+        {"shortcut", "desktop/shortcut", SelectionShortcut},
+        {"screenshotShortcut", "desktop/screenshotShortcut", ScreenshotShortcut},
         {"ocrApiKey", "ocr/baidu/apiKey", ""},
         {"ocrSecretKey", "ocr/baidu/secretKey", ""},
         {"fontSize", "window/fontSize", 17}, {"stayOnTop", "window/stayOnTop", true},
@@ -184,8 +190,9 @@ bool AppSettings::setError(const QString &error)
 bool AppSettings::persist(const QVariantMap &values)
 {
     const auto directory = QFileInfo(m_path).absolutePath();
-    if (!QDir().mkpath(directory) || !QFile::setPermissions(directory, PrivateFile | QFileDevice::ExeOwner))
-        return setError(QStringLiteral("无法创建配置目录或设置访问权限。"));
+    QString storageError;
+    if (!prepareSettingsDirectory(directory, &storageError))
+        return setError(storageError);
     QTemporaryFile temporary(directory + "/.settings-XXXXXX.ini");
     if (!temporary.open())
         return setError(QStringLiteral("无法创建临时配置文件。"));
@@ -207,13 +214,10 @@ bool AppSettings::persist(const QVariantMap &values)
             return setError(QStringLiteral("配置文件写入失败。"));
     }
     QFile source(temporary.fileName());
-    QSaveFile destination(m_path);
-    if (!source.open(QIODevice::ReadOnly) || !destination.open(QIODevice::WriteOnly)
-        || !destination.setPermissions(PrivateFile))
-        return setError(QStringLiteral("无法保存配置，请检查目录权限。"));
-    const auto contents = source.readAll();
-    if (destination.write(contents) != contents.size() || !destination.commit())
-        return setError(QStringLiteral("配置保存失败，请检查磁盘空间。"));
+    if (!source.open(QIODevice::ReadOnly))
+        return setError(QStringLiteral("无法读取临时配置文件。"));
+    if (!writePrivateSettings(m_path, source.readAll(), &storageError))
+        return setError(storageError);
     return true;
 }
 

@@ -6,10 +6,11 @@ import Trans.Core
 UiScrollView {
     id: root
     required property DesktopBridge desktop
+    required property AppSettings appSettings
     property bool recording: false
     property bool recordingScreenshot: false
-    property string screenshotShortcut: "Meta+Shift+O"
-    property string shortcut: "Meta+Shift+T"
+    property string screenshotShortcut: appSettings.defaults().screenshotShortcut
+    property string shortcut: appSettings.defaults().shortcut
     contentWidth: availableWidth
     clip: true
     function load(values) {
@@ -80,7 +81,7 @@ UiScrollView {
                 UiButton { text: "清空"; quiet: true; onClicked: { root.shortcut = ""; root.recording = false } }
             }
             Label { text: "组合键需包含 Ctrl、Alt 或 Meta。按 Esc 取消录制。"; font.pixelSize: 11; color: ui.muted; Layout.fillWidth: true; wrapMode: Text.Wrap }
-            UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; enabled: root.desktop.capabilities.shortcuts.available; onClicked: root.shortcut = "Meta+Shift+T" }
+            UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; enabled: root.desktop.capabilities.shortcuts.available; onClicked: root.shortcut = root.appSettings.defaults().shortcut }
             Label { text: root.desktop.shortcutError; color: ui.danger; font.pixelSize: 12; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.Wrap }
         }
         UiSection {
@@ -126,7 +127,7 @@ UiScrollView {
                 }
                 UiButton { text: "清空"; quiet: true; onClicked: { root.screenshotShortcut = ""; root.recordingScreenshot = false } }
             }
-            UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; enabled: root.desktop.capabilities.shortcuts.available; onClicked: root.screenshotShortcut = "Meta+Shift+O" }
+            UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; enabled: root.desktop.capabilities.shortcuts.available; onClicked: root.screenshotShortcut = root.appSettings.defaults().screenshotShortcut }
         }
         UiSection {
             Layout.fillWidth: true

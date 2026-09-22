@@ -3,7 +3,9 @@
 #include "platform/platform_services.h"
 #include "platform/selection_reader.h"
 #include "platform/shortcut_service.h"
+#ifdef Q_OS_LINUX
 #include "platform/linux/instance_channel_linux.h"
+#endif
 #include "providers.h"
 #include "settings.h"
 #include "provider_tools.h"
@@ -16,10 +18,12 @@
 #include <QScreen>
 
 #include <QClipboard>
+#ifdef Q_OS_LINUX
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
+#endif
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -742,13 +746,14 @@ private slots:
         DesktopBridge desktop(controller, settings, *platform);
         QSignalSpy saved(&desktop, &DesktopBridge::settingsSaveFinished);
         auto draft = settings.snapshot();
+        const auto original = settings.shortcut();
         draft["shortcut"] = "Ctrl+Alt+Y";
         shortcut->reject = true;
         desktop.saveSettings(draft);
         QTRY_COMPARE(saved.size(), 1);
         QVERIFY(!saved.takeFirst().first().toBool());
         QVERIFY(!QFile::exists(settings.configPath()));
-        QCOMPARE(settings.shortcut(), QStringLiteral("Meta+Shift+T"));
+        QCOMPARE(settings.shortcut(), original);
         shortcut->reject = false;
         // A regular file as the parent directory forces a real persistence error.
         QFile blocker(directory.filePath("blocker"));
@@ -1265,11 +1270,13 @@ private slots:
         AppSettings loaded(registry, path);
         QCOMPARE(loaded.snapshot(), expected);
         QVERIFY(loaded.isConfigured());
+        #ifdef Q_OS_UNIX
         const auto permissions = QFile::permissions(path);
         QVERIFY(permissions.testFlag(QFileDevice::ReadOwner));
         QVERIFY(permissions.testFlag(QFileDevice::WriteOwner));
         QVERIFY(!(permissions & (QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ExeGroup
                                  | QFileDevice::ReadOther | QFileDevice::WriteOther | QFileDevice::ExeOther)));
+        #endif
         QFile file(path);
         QVERIFY(file.open(QIODevice::ReadOnly));
         QVERIFY(file.readAll().contains("dummy-local-key"));
@@ -1328,6 +1335,7 @@ private slots:
         QVERIFY(!saved.contains("window/rememberSize"));
     }
 
+#ifdef Q_OS_LINUX
     void selectionPreservesClipboard()
     {
         auto *clipboard = QGuiApplication::clipboard();
@@ -1447,6 +1455,7 @@ private slots:
         QVERIFY(QDBusPendingReply<>(failedStartup).isError());
         QVERIFY(!settingsWindow.isVisible());
     }
+    #endif
 };
 
 QTEST_MAIN(TransTest)

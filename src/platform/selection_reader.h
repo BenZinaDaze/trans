@@ -23,15 +23,15 @@ protected:
     {
         if (m_finished) return;
         m_finished = true;
-        emit succeeded(result);
         deleteLater();
+        emit succeeded(result);
     }
     void fail(const PlatformError &error)
     {
         if (m_finished) return;
         m_finished = true;
-        emit failed(error);
         deleteLater();
+        emit failed(error);
     }
 private:
     bool m_finished = false;

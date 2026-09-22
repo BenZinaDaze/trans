@@ -222,6 +222,7 @@ ApplicationWindow {
                     id: desktopPage
                     objectName: "desktopPage"
                     desktop: root.desktop
+                    appSettings: root.appSettings
                 }
                 OcrPage { id: ocrPage; objectName: "ocrPage"; desktop: root.desktop }
             }

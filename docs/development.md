@@ -4,7 +4,7 @@
 
 ## 本地构建与运行
 
-Trans 使用 C++20、Qt 6 / QML 和 KDE Frameworks 6。CMake 最低版本为 3.24，Qt 最低版本为 6.5。现有开发环境使用 conda `myself`，构建链接系统 Qt/KDE 库，无需安装 Python 包；发行包运行不需要 conda。
+Trans 使用 C++20、Qt 6 / QML；Linux 后端另需 KDE Frameworks 6。CMake 最低版本为 3.24，Linux 的 Qt 最低版本为 6.5，Windows 最低为 6.8。以下 Linux 开发命令使用 conda `myself`，构建链接系统 Qt/KDE 库，无需安装 Python 包；发行包运行不需要 conda。
 
 ```sh
 sudo pacman -S --needed base-devel cmake ninja qt6-base qt6-declarative qt6-svg kglobalaccel kwindowsystem
@@ -17,6 +17,26 @@ conda run -n myself --no-capture-output ./build/trans --settings
 也可先 `conda activate myself` 再执行命令，或在系统环境中直接执行去掉 `conda run -n myself --no-capture-output` 前缀的命令。预设指定系统 `/usr` 中的 Qt/KDE；不要通过 `QT_PLUGIN_PATH`、`QML_IMPORT_PATH`、`LD_LIBRARY_PATH` 混入另一套 Qt 库。
 
 首次启动显示配置中心；以后可从托盘菜单、翻译弹窗右上角的设置图标或 `./build/trans --settings` 打开。语言栏右侧的箭头可直接打开翻译偏好。再次启动会将命令转交已有实例。`./build/trans --translate` 翻译当前选区；`./build/trans --ocr` 发起截图翻译。退出位于托盘菜单。
+
+### Windows 原生构建与部署
+
+目标为 Windows 10 22H2 / Windows 11 x64，普通用户运行；不提供 ARM64 或 32 位构建。CI 固定使用 Windows runner、MSVC 2022 x64 和 Qt 6.8.3，Windows 不链接 Qt DBus、KF6 或 X11。安装 Visual Studio 2022 的 C++ 桌面组件、Qt 对应的 MSVC 2022 64 位组件、CMake、Python 和 PowerShell 7.4+ 后：
+
+```powershell
+$qt = 'C:/Qt/6.8.3/msvc2022_64'
+$env:PATH = "$qt/bin;$env:PATH"
+cmake -S . -B build-windows -G 'Visual Studio 17 2022' -A x64 "-DCMAKE_PREFIX_PATH=$qt" -DCMAKE_INSTALL_BINDIR=. -DBUILD_TESTING=ON
+cmake --build build-windows --config Release --parallel 4
+cmake --build build-windows --config Release --target trans_qmllint
+ctest --test-dir build-windows -C Release --output-on-failure
+./packaging/deploy-windows.ps1 -BuildDir build-windows -QtRoot $qt -QtVersion 6.8.3 -OutputDir dist-windows
+```
+
+部署脚本使用 `windeployqt --qmldir qml` 收集两个 EXE 的 DLL/QML/插件依赖，并加入 app-local MSVC CRT、Qt 许可证、第三方声明和对应源码链接。暂未选择本项目许可证，不能把 Qt 的许可证当成本项目许可证。ZIP 在清除开发环境 Qt 路径后执行窗口启动及截图冒烟，再生成独立的 `SHA256SUMS-windows-x64`。重复部署应使用新的输出目录，避免混入旧包文件。主程序与取词 helper 必须一起分发，均使用动态 Qt 运行库。
+
+`.github/workflows/windows.yml` 在 push/PR 时构建、检查并上传 ZIP；版本标签通过 CMake 版本校验后才上传 Release。Windows 与 Arch 使用不同的校验文件，并通过同一 release 并发组串行上传附件。该流程未包含代码签名、安装器或自动更新。
+
+Linux 上可以使用与官方 Qt MinGW 包匹配的交叉工具链做编译检查，但不能用交叉编译成功替代 Windows 执行结果。Windows CI 的 offscreen 启动也不能替代真实桌面取词、截图、快捷键和焦点验收。
 
 ## 架构与参考
 
@@ -36,15 +56,37 @@ main → InstanceChannel（单实例/命令转发）+ PlatformServices（平台�
 
 ### 平台能力边界
 
-`src/platform/` 定义 `SelectionReader`、`ShortcutService`、`ScreenshotService`、`WindowIntegration`、`InstanceChannel`；Linux 实现在 `src/platform/linux/`。`main` 创建并注入 `PlatformServices`，QML 与控制器不包含 KDE、X11、D-Bus 类型。浮窗几何、托盘、普通剪贴板写入、翻译与 OCR 保持共享。
+`src/platform/` 定义 `SelectionReader`、`ShortcutService`、`ScreenshotService`、`WindowIntegration`、`InstanceChannel` 和配置存储边界；Linux 与 Windows 实现分别在 `src/platform/linux/`、`src/platform/windows/`。`main` 创建并注入 `PlatformServices`，QML 与控制器不包含 KDE、X11、D-Bus 或 Windows 类型。浮窗几何、托盘、普通剪贴板写入、翻译与 OCR 保持共享。
 
-构建目标分为 `trans_platform`（公共接口和可复用框选组件）、`trans_platform_linux`（原生后端）、`trans_core`（业务/QML 门面）。Qt DBus 和 KF6 只由 Linux 后端使用；Linux 桌面文件与 X11 测试按平台启用。当前仍只正式支持 Arch Linux x86_64 / Plasma 6 X11，其他系统配置构建会明确拒绝：平台接口并不代表 Windows 后端已经实现。后续移植需增加真实后端、工厂、构建与发布规则，不添加成功空实现。
+构建目标分为 `trans_platform`（公共接口和可复用框选组件）、`trans_platform_linux` / `trans_platform_windows`（按目标平台选择一个真实后端）、`trans_core`（业务/QML 门面）。Qt DBus 和 KF6 只由 Linux 后端使用；Linux 桌面文件与 X11 测试按平台启用。Windows 另构建 `trans_selection_helper.exe`，主程序包含图标、版本、普通用户权限及 Per-Monitor V2 DPI manifest。其他系统明确拒绝配置，不添加成功空实现。
 
 选区读取返回 `SelectionJob`，在呈现窗口前异步完成；`SourceContextPtr` 保存不透明来源信息。`selecting`、截图、OCR、翻译使用同一请求代次隔离迟到回调。任务由 QObject owner 管理，正常完成后延迟删除，取消应幂等且不得重复通知。平台错误使用 `PlatformError`，区分不支持、服务不可用、权限拒绝、无选区、冲突、超时与取消。
 
 快捷键通过 `ShortcutService::update(action, sequence, owner)` 异步更新，两个动作共享一个服务。`DesktopBridge::saveSettings` 不再返回同步成功值；`settingsBusy` 与 `settingsSaveFinished(bool)` 通知界面。保存请求串行处理，交换绑定前先释放两项，注册或持久化失败后尝试补偿；补偿失败明确显示错误和实际生效绑定，不能声称系统注册与配置文件构成原子事务。
 
-`capabilities` 向界面提供选区、截图、快捷键、焦点恢复的状态及原因，不以 OS 名称判断功能。窗口激活仅是请求，不保证系统接受。`InstanceChannel` 保留服务 `io.github.trans.Trans`、路径 `/Trans` 和四个固定方法；就绪前的调用等待处理，启动失败或超时返回错误，未知方法不执行。冒烟模式不注册实例与快捷键。
+`capabilities` 向界面提供选区、截图、快捷键、焦点恢复的状态及原因，不以 OS 名称判断功能。窗口激活仅是请求，不保证系统接受。Linux `InstanceChannel` 保留服务 `io.github.trans.Trans`、路径 `/Trans` 和四个固定方法；Windows 使用当前用户/登录会话隔离的本地 IPC。就绪前的调用等待处理，启动失败或超时返回错误，未知命令不执行。冒烟模式不注册实例与快捷键。
+
+### Windows 后端契约
+
+- **快捷键**：`RegisterHotKey` / `UnregisterHotKey` + Qt 原生事件过滤，使用 `MOD_NOREPEAT`；释放注册项后不再派发迟到事件。默认选区 `Ctrl+Alt+T`、截图 `Ctrl+Alt+O`，已保存配置不自动改写；冲突显示实际生效状态，不把注册失败说成成功。
+- **选区**：触发时捕获源 HWND/PID/TID；异步 helper 在 COM STA 中查询 UI Automation `TextPattern::GetSelection()`，支持无 HWND 的文档子节点及嵌入式跨进程控件，但祖先链必须回到捕获的源窗口。拒绝 Trans 自己、密码控件和更高权限来源，取词前后验证原生/UIA 焦点；无选区或不支持时不读取旧剪贴板、不模拟复制、不自动切换取图。
+- **helper 隔离**：使用限长、版本化的 stdin/stdout 协议，仅返回文本与枚举错误，不执行任意命令。父进程限制时间、输出大小和进程生命周期，取消/替换会终止本次 helper；Job Object 防止父进程退出后遗留辅助进程。没有每次取词共享一个永久卡死 COM 工作线程的路径。
+- **截图**：等待 Qt 提交隐藏窗口并同步 DWM 后，通过 `QScreen::grabWindow(0)` 获取各屏幕原始像素；复用 `RegionOverlay` 在单个起始屏幕内框选。取消、显示配置变化和超时立即隐藏全部遮罩，随后销毁。不保存图片历史，不保证识别受保护的黑色画面。
+- **窗口**：请求系统激活与焦点恢复，不强制抢焦点、不发送模拟 Alt 键。原生窗口样式隐藏浮窗任务栏项；关闭时仅对仍存在且身份匹配的源窗口请求恢复。
+- **单实例**：命名互斥对象负责选举，受限的 `QLocalServer`/命名管道负责四个固定 `AppCommand` 转发。服务端校验客户端用户与登录会话，协议限长并有超时；只有命令已派发才确认，确认不代表翻译完成。主实例启动失败会拒绝待处理请求，不允许第二实例绕过失败自行注册快捷键。
+
+### Windows 发布前桌面验收
+
+当前新增 Windows 后端仍需在 Windows 10 22H2 和 Windows 11 上分别完成下列原生验收；Linux 编译或 GitHub Windows Server runner 通过不等于已完成：
+
+- 干净普通用户环境完整解压 ZIP，无 Qt/VS 开发目录也能启动，中文、输入法、TLS 请求和 helper 均正常。
+- 记事本、Edge/Chrome、VS Code、终端和 PDF 阅读器中触发取词；无选区、无 TextPattern、密码框、管理员窗口明确失败且剪贴板保持不变。
+- 取词卡住、快速重复触发、切换源焦点、取消和退出；无迟到译文、无 helper 残留。
+- 两种快捷键触发、占用冲突、交换、持久化失败、恢复失败和退出后释放；另一程序能重新注册已释放的键。
+- 单屏以及多屏不同 DPI（100%、125%、150%、200%）、负坐标屏、截图 Esc/右键取消、显示器热插拔；截图不含 Trans 自己，框内像素对应选区。
+- 浮窗置顶/非置顶、设置窗口层级、Esc、系统拒绝激活以及关闭后恢复源窗口；Alt+Tab 不被不必要地改变。
+- 同时启动、启动期间转发、主实例退出及不同登录会话隔离；不丢命令、不重复注册、不跨会话转发。
+- 配置文件和临时文件的 DACL、保存失败保留旧内容；不要把本地明文配置描述为加密存储。
 
 ## 配置与协议细节
 
@@ -84,15 +126,15 @@ OpenAI Responses 请求设置 `store: false`，从完成的 assistant 消息中�
 
 ### 快捷键与窗口
 
-- 点击“录制”，按含 Ctrl、Alt 或 Meta 的组合；Esc 取消录制。“清空”禁用，“默认快捷键”恢复 Meta+Shift+T。保存时通过 KGlobalAccel 检查冲突，失败会提示且不保存新设置；无需打开 KDE 系统设置。
+- 点击“录制”，按含 Ctrl、Alt 或 Meta 的组合；Esc 取消录制。“清空”禁用，“默认快捷键”从 `AppSettings::defaults()` 读取平台默认值。保存时由当前平台后端检查注册结果，失败会提示且不保存新设置；无需用户手动修改系统快捷键配置。
 - 弹窗位置：鼠标所在屏幕中央或鼠标附近，均限制在屏幕可用区域内。
 - 译文字号、是否置顶，以及关闭后是否恢复原应用焦点。翻译窗统一按原文和译文自动计算宽高，不再提供或保存手动尺寸。
 
 自动尺寸使用与显示控件相同的字体测量文本，译文返回或字号变化时合并布局更新。短词使用紧凑窗口，长段落扩展到当前屏幕可用区域内的阅读上限，超出部分滚动显示。结果返回时在原屏幕调整尺寸，不跟随已经移开的鼠标；窗口装饰边框也包含在边界检查中。
 
-设置窗是翻译窗的非模态从属对话框，翻译窗置顶或重新显示时，设置窗仍保持在它上方；单独显示设置窗时不置顶。翻译窗使用普通窗口类型以避免 KDE 的工具窗口层级冲突，通过 KDE 的窗口状态接口隐藏任务栏和分页器条目。滚轮先交给鼠标下的控件处理，提示词等内层编辑框到达边界后交给外层页面；侧边滚动条也支持滚轮，无需先点击获得焦点。
+设置窗是翻译窗的非模态从属对话框，翻译窗置顶或重新显示时，设置窗仍保持在它上方；单独显示设置窗时不置顶。Linux 翻译窗使用普通窗口类型以避免 KDE 的工具窗口层级冲突，通过 KDE 窗口接口隐藏任务栏和分页器条目；Windows 由原生后端设置对应窗口样式。滚轮先交给鼠标下的控件处理，提示词等内层编辑框到达边界后交给外层页面；侧边滚动条也支持滚轮，无需先点击获得焦点。
 
-全局快捷键通过 KGlobalAccel 经会话 D-Bus 注册到 KDE 的 `kglobalacceld`，组件名为 `trans`，动作名为 `translate-selection`。KDE 在 `~/.config/kglobalshortcutsrc` 中保留绑定；程序启动时先恢复绑定，再应用 Trans 本地配置中的快捷键。KDE 的可用性查询会把当前动作自己的活动绑定也视为占用，因此冲突检查先排除当前动作已持有的键。通过 D-Bus 服务 `io.github.trans.Trans` 确保单实例，后续进程仅向已有实例转发命令，不重复注册快捷键。
+Linux 全局快捷键通过 KGlobalAccel 经会话 D-Bus 注册到 KDE 的 `kglobalacceld`，组件名为 `trans`，动作名为 `translate-selection`。KDE 在 `~/.config/kglobalshortcutsrc` 中保留绑定；程序启动时先恢复绑定，再应用 Trans 本地配置中的快捷键。KDE 的可用性查询会把当前动作自己的活动绑定也视为占用，因此冲突检查先排除当前动作已持有的键。Linux 通过 D-Bus 服务 `io.github.trans.Trans` 确保单实例，后续进程仅向已有实例转发命令，不重复注册快捷键。
 
 ### 截图 OCR
 
@@ -104,7 +146,7 @@ OpenAI Responses 请求设置 `store: false`，从完成的 assistant 消息中�
 
 控制器状态包含 `selecting`、`capturing`、`recognizing`，共用请求编号隔离旧选区、截图、OCR 和翻译响应。识别文字逐行保留，交给现有翻译方法和输入上限检查；重新翻译不重新识别。截图时隐藏两个窗口但保留设置草稿；截图取消恢复先前内容，识别失败提示重新截图。关闭结果窗取消当前请求。
 
-动作 `translate-screenshot` 默认 Meta+Shift+O；`TranslateScreenshot` 同时通过 QML、托盘和单实例 D-Bus 暴露。快捷键保存先释放变更绑定，以支持交换两个快捷键；应用绑定或持久化失败时尝试恢复原绑定，恢复失败显示实际状态。OCR 密钥使用原有配置文件权限与原子保存机制。Portal 返回本地 URI 后读取为 `QImage`，不保存历史、不删除归属不明的 Portal 文件。
+动作 `translate-screenshot` 在 Linux 默认 Meta+Shift+O，Windows 默认 Ctrl+Alt+O；`TranslateScreenshot` 同时通过 QML、托盘和平台单实例通道暴露。快捷键保存先释放变更绑定，以支持交换两个快捷键；应用绑定或持久化失败时尝试恢复原绑定，恢复失败显示实际状态。OCR 密钥使用平台配置文件权限与原子保存机制。Portal 返回本地 URI 后读取为 `QImage`，不保存历史、不删除归属不明的 Portal 文件。
 
 `trans_ocr_tests` 使用本地 HTTP 服务与私有 D-Bus，覆盖鉴权缓存和刷新、请求编码、图片限制、空结果/额度/超时/取消、Portal 能力与响应、任务替换和快捷键回滚，不访问真实百度服务。配置页测试覆盖 OCR 草稿、保存和截图取消恢复。区域裁剪测试验证像素内容、反向拖动、缩放映射和误点击；可选 X11 测试使用真实鼠标拖动验证返回的图片尺寸及 Esc 取消。
 
@@ -114,13 +156,13 @@ OpenAI Responses 请求设置 `store: false`，从完成的 assistant 消息中�
 
 新版只使用 `trans/settings.ini`，不尝试读取或导入旧 `tran/settings.ini`。冒烟测试使用临时配置，不访问用户配置。
 
-配置默认保存于 `~/.config/trans/settings.ini`，遵循 `XDG_CONFIG_HOME`。**密钥以明文保存在应用本地文件**，不使用系统密钥库。目录权限为 `0700`，文件为 `0600`，通过原子替换保存。保存失败时保留原文件和生效配置。
+Linux 配置默认保存于 `~/.config/trans/settings.ini`，遵循 `XDG_CONFIG_HOME`；Windows 使用 `QStandardPaths::AppConfigLocation`，通常为 `%LOCALAPPDATA%\trans\settings.ini`。**密钥以明文保存在应用本地文件**，不使用系统密钥库。Linux 目录权限为 `0700`，文件为 `0600`；Windows 对目录及最终文件建立仅当前用户/SYSTEM 的受保护 DACL，临时文件在写入内容前即建立相同权限，使用同目录写入和替换。权限设置或原子替换失败会保留原文件和生效配置，不回退为无保护保存。
 
 旧版的 OpenAI 地址、密钥、模型会自动读入并保留 Chat Completions 模式。旧版其他提供商不再可选，原先选中其他提供商时回到 OpenAI；下一次从页面保存时清理它们的配置。模型获取不写入配置，测试翻译不会自动保存编辑内容。
 
 旧版 `window/width`、`window/height` 和 `window/rememberSize` 不再读取；下一次保存设置时移除这些字段。窗口关闭和自动调整大小都不会写入配置。
 
-最近一次原文和译文保留在内存中，关闭弹窗不会清除，退出程序后清除，不写入磁盘。应用只在用户触发翻译时读取 X11 PRIMARY 选区，重新打开窗口不会读取选区；除“复制译文”外，不修改普通剪贴板。当前不支持 Wayland 选区读取或翻译历史；截图路径在 X11 使用内置框选，并保留 Portal 后端供后续适配 Wayland，但本版仅验收 X11。
+最近一次原文和译文保留在内存中，关闭弹窗不会清除，退出程序后清除，不写入磁盘。只在用户触发翻译时读取 Linux X11 PRIMARY 或 Windows UI Automation 选区，重新打开窗口不会读取选区；除“复制译文”外，不修改普通剪贴板。不支持 Wayland 选区读取或翻译历史；截图在 X11/Windows 使用内置框选，并保留 Portal 后端供后续 Wayland 适配。
 
 ## 验证与本地安装
 
