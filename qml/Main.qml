@@ -303,7 +303,7 @@ ApplicationWindow {
                                 implicitHeight: 22
                             }
                             Label {
-                                text: root.controller.status === "capturing" ? "正在截图…" : root.controller.status === "recognizing" ? "正在识别文字…" : root.controller.busy ? "正在翻译…" : (root.controller.status === "idle" ? "等待选中文字" : (root.controller.status === "cancelled" ? "已取消请求" : "暂时无法翻译"))
+                                text: root.controller.status === "selecting" ? "正在读取选区…" : root.controller.status === "capturing" ? "正在截图…" : root.controller.status === "recognizing" ? "正在识别文字…" : root.controller.busy ? "正在翻译…" : (root.controller.status === "idle" ? "等待选中文字" : (root.controller.status === "cancelled" ? "已取消请求" : "暂时无法翻译"))
                                 color: ui.text
                                 font.pixelSize: root.compact ? 12 : 14
                                 font.weight: Font.Medium
@@ -311,7 +311,7 @@ ApplicationWindow {
                         }
                         Label {
                             id: stateMessage
-                            text: root.controller.status === "capturing" ? "请拖动鼠标框选文字，松开识别；Esc 取消。" : root.controller.status === "recognizing" ? "正在等待百度 OCR 返回识别结果" : root.controller.busy ? "正在等待 " + root.providerName + " 返回结果" : (root.controller.message || "在任意应用中选中文字，按快捷键即可查看译文。")
+                            text: root.controller.status === "selecting" ? "读取完成前不会切换窗口焦点。" : root.controller.status === "capturing" ? "请拖动鼠标框选文字，松开识别；Esc 取消。" : root.controller.status === "recognizing" ? "正在等待百度 OCR 返回识别结果" : root.controller.busy ? "正在等待 " + root.providerName + " 返回结果" : (root.controller.message || "在任意应用中选中文字，按快捷键即可查看译文。")
                             textFormat: Text.PlainText
                             color: ui.muted
                             font.pixelSize: 12

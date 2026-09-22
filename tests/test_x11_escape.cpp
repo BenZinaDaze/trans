@@ -1,11 +1,12 @@
 #include "controller.h"
 #include "desktop.h"
-#include "region_capture.h"
+#include "platform/platform_services.h"
 #include "provider_tools.h"
 
 #include <KGlobalAccel>
 #include <KWindowInfo>
 #include <KX11Extras>
+#include <QAction>
 #include <QApplication>
 #include <QClipboard>
 #include <QCursor>
@@ -87,8 +88,8 @@ private slots:
                     && widget->geometry().contains(QCursor::pos())) return widget;
             return nullptr;
         };
-        auto *job = createScreenshotJob(this);
-        QVERIFY(qobject_cast<X11RegionScreenshotJob *>(job));
+        std::unique_ptr<ScreenshotService> screenshots(createScreenshotService());
+        auto *job = screenshots->captureRegion(this);
         QSignalSpy success(job, &ScreenshotJob::succeeded);
         QSignalSpy failure(job, &ScreenshotJob::failed);
         QTRY_VERIFY(findOverlay());
@@ -105,12 +106,12 @@ private slots:
         QVERIFY(qAbs(image.height() - 100 * dpr) <= 1);
         QTRY_VERIFY(!findOverlay());
         // Escape must work immediately, without clicking to focus the overlay.
-        job = createScreenshotJob(this);
+        job = screenshots->captureRegion(this);
         QSignalSpy cancelled(job, &ScreenshotJob::failed);
         QTRY_VERIFY(findOverlay());
         QVERIFY(xdotool({"key", "Escape"}));
         QTRY_COMPARE(cancelled.size(), 1);
-        QCOMPARE(qvariant_cast<TranslationError>(cancelled.first().first()).code, ErrorCode::Cancelled);
+        QCOMPARE(qvariant_cast<PlatformError>(cancelled.first().first()).code, PlatformErrorCode::Cancelled);
         QTRY_VERIFY(!findOverlay());
     }
     void automaticPopupSize_data()
@@ -144,7 +145,8 @@ private slots:
         values["popupPosition"] = position;
         QVERIFY(settings.save(values));
         TranslationController controller(registry, settings);
-        DesktopBridge desktop(controller, settings);
+        auto platform = createPlatformServices();
+        DesktopBridge desktop(controller, settings, *platform);
         ProviderTools tools(registry);
         QQmlApplicationEngine engine;
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
@@ -166,7 +168,9 @@ private slots:
         QCursor::setPos(available.topLeft() + QPoint(10, 10));
         controller.translateText(QStringLiteral("A long source paragraph.\n").repeated(80));
         manual->job->finish(QStringLiteral("译文随内容展开，超长文本在窗口内部滚动。\n").repeated(150));
-        QTRY_VERIFY(popup->width() > small.width() && popup->height() > small.height());
+        // These short lines require more height, not necessarily more width:
+        // native font metrics may keep every line within the minimum width.
+        QTRY_VERIFY(popup->height() > small.height());
         QTRY_COMPARE(popup->size(), popup->property("preferredSize").toSize());
         QTRY_VERIFY(available.contains(popup->frameGeometry()));
         // Results resize in place on the original screen instead of chasing the pointer.
@@ -204,7 +208,8 @@ private slots:
         values["stayOnTop"] = stayOnTop;
         QVERIFY(settings.save(values));
         TranslationController controller(registry, settings);
-        DesktopBridge desktop(controller, settings);
+        auto platform = createPlatformServices();
+        DesktopBridge desktop(controller, settings, *platform);
         ProviderTools tools(registry);
         QQmlApplicationEngine engine;
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
@@ -305,14 +310,24 @@ private slots:
             QVERIFY(accelerator->setShortcut(&saved, {owned}, KGlobalAccel::NoAutoloading));
             QCOMPARE(accelerator->shortcut(&saved), QList<QKeySequence>{owned});
         }
+        const auto update = [this](ShortcutService &service, const QString &sequence, bool accepted = true) {
+            auto *job = service.update(ShortcutAction::Selection, sequence, this);
+            QSignalSpy succeeded(job, &ShortcutJob::succeeded);
+            QSignalSpy failed(job, &ShortcutJob::failed);
+            if (!QTest::qWaitFor([&] { return !succeeded.isEmpty() || !failed.isEmpty(); }, 5000))
+                return false;
+            if (accepted)
+                return succeeded.size() == 1 && failed.isEmpty();
+            return succeeded.isEmpty() && failed.size() == 1
+                && qvariant_cast<PlatformError>(failed.first().first()).code == PlatformErrorCode::Conflict;
+        };
         {
-            ShortcutService service;
-            service.initialize(owned.toString(QKeySequence::PortableText));
+            std::unique_ptr<ShortcutService> service(createShortcutService());
+            QVERIFY(update(*service, owned.toString(QKeySequence::PortableText)));
             // The availability API reports an active shortcut as occupied even for its owner.
             QVERIFY(!KGlobalAccel::isGlobalShortcutAvailable(owned, component));
-            QVERIFY2(service.error().isEmpty(), qPrintable(service.error()));
-            QCOMPARE(service.sequence(), owned.toString(QKeySequence::PortableText));
-            QVERIFY(service.apply(service.sequence()));
+            QCOMPARE(service->sequence(ShortcutAction::Selection), owned.toString(QKeySequence::PortableText));
+            QVERIFY(update(*service, service->sequence(ShortcutAction::Selection)));
 
             QAction other;
             other.setProperty("componentName", component + QStringLiteral("-other"));
@@ -321,23 +336,19 @@ private slots:
             const auto removeOther = qScopeGuard([&] { accelerator->removeAllShortcuts(&other); });
             QVERIFY(accelerator->setShortcut(&other, {occupied}, KGlobalAccel::NoAutoloading));
             QCOMPARE(accelerator->shortcut(&other), QList<QKeySequence>{occupied});
-            QVERIFY(!service.apply(occupied.toString(QKeySequence::PortableText)));
-            QVERIFY(!service.error().isEmpty());
-            QCOMPARE(service.sequence(), owned.toString(QKeySequence::PortableText));
+            QVERIFY(update(*service, occupied.toString(QKeySequence::PortableText), false));
+            QCOMPARE(service->sequence(ShortcutAction::Selection), owned.toString(QKeySequence::PortableText));
             QCOMPARE(accelerator->shortcut(&other), QList<QKeySequence>{occupied});
-            QVERIFY(service.apply(owned.toString(QKeySequence::PortableText)));
-            QVERIFY(service.error().isEmpty());
+            QVERIFY(update(*service, owned.toString(QKeySequence::PortableText)));
         }
         // Recreate the service as on a normal restart; KDE must restore our saved key.
-        ShortcutService restarted;
-        restarted.initialize(owned.toString(QKeySequence::PortableText));
-        QVERIFY2(restarted.error().isEmpty(), qPrintable(restarted.error()));
-        QCOMPARE(restarted.sequence(), owned.toString(QKeySequence::PortableText));
-        QVERIFY(restarted.apply(QString()));
-        QVERIFY(restarted.sequence().isEmpty());
-        restarted.initialize(QString());
-        QVERIFY(restarted.sequence().isEmpty());
-        QVERIFY(restarted.error().isEmpty());
+        std::unique_ptr<ShortcutService> restarted(createShortcutService());
+        QVERIFY(update(*restarted, owned.toString(QKeySequence::PortableText)));
+        QCOMPARE(restarted->sequence(ShortcutAction::Selection), owned.toString(QKeySequence::PortableText));
+        QVERIFY(update(*restarted, QString()));
+        QVERIFY(restarted->sequence(ShortcutAction::Selection).isEmpty());
+        QVERIFY(update(*restarted, QString()));
+        QVERIFY(restarted->sequence(ShortcutAction::Selection).isEmpty());
         QVERIFY(KGlobalAccel::isGlobalShortcutAvailable(owned));
     }
 
@@ -371,7 +382,8 @@ private slots:
         registry.add(std::move(provider));
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
-        DesktopBridge desktop(controller, settings);
+        auto platform = createPlatformServices();
+        DesktopBridge desktop(controller, settings, *platform);
         ProviderTools tools(registry);
         QQmlApplicationEngine engine;
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},

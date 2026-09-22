@@ -1,7 +1,6 @@
 #pragma once
 
-#include "screenshot.h"
-#include <QPointer>
+#include <QImage>
 #include <QRectF>
 #include <QWidget>
 #include <functional>
@@ -28,22 +27,5 @@ private:
     QPointF m_current;
     bool m_dragging = false;
 };
-
-class X11RegionScreenshotJob final : public ScreenshotJob {
-    Q_OBJECT
-public:
-    explicit X11RegionScreenshotJob(QObject *owner = nullptr);
-    ~X11RegionScreenshotJob() override;
-    void cancel() override;
-private:
-    void start();
-    void clearOverlays();
-    void fail(ErrorCode code, const QString &message);
-    QList<QPointer<RegionOverlay>> m_overlays;
-    QTimer m_timer;
-    bool m_done = false;
-};
-
-ScreenshotJob *createScreenshotJob(QObject *owner);
 
 } // namespace Trans

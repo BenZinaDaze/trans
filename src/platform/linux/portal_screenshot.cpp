@@ -1,10 +1,12 @@
-#include "screenshot.h"
-#include <QDBusArgument>
+#include "portal_screenshot.h"
+#include <QCoreApplication>
+#include <QDBusError>
 #include <QDBusMessage>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QFileInfo>
 #include <QImageReader>
+#include <QPointer>
 #include <QUrl>
 #include <QUuid>
 
@@ -13,13 +15,24 @@ namespace {
 const QString desktopPath = QStringLiteral("/org/freedesktop/portal/desktop");
 const QString screenshotInterface = QStringLiteral("org.freedesktop.portal.Screenshot");
 const QString requestInterface = QStringLiteral("org.freedesktop.portal.Request");
+
+PlatformError dbusFailure(const QDBusError &error, PlatformErrorCode fallback, const QString &message)
+{
+    if (error.type() == QDBusError::AccessDenied || error.name() == "org.freedesktop.portal.Error.NotAllowed")
+        return {PlatformErrorCode::PermissionDenied, QStringLiteral("桌面拒绝了截图服务访问，请检查权限。")};
+    if (error.type() == QDBusError::NoReply || error.type() == QDBusError::Timeout)
+        return {PlatformErrorCode::Timeout, QStringLiteral("截图请求超时，请重试。")};
+    if (error.name() == "org.freedesktop.portal.Error.Cancelled")
+        return {PlatformErrorCode::Cancelled, QStringLiteral("截图已取消。")};
+    return {fallback, message};
+}
 }
 PortalScreenshotJob::PortalScreenshotJob(QObject *owner, const QDBusConnection &bus, const QString &service)
     : ScreenshotJob(owner), m_bus(bus), m_service(service)
 {
     m_timer.setSingleShot(true);
     connect(&m_timer, &QTimer::timeout, this, [this] {
-        finish({ErrorCode::Timeout, QStringLiteral("截图请求超时，请重试。")});
+        finish({PlatformErrorCode::Timeout, QStringLiteral("截图请求超时，请重试。")});
     });
     // Allow the compositor to process the application's hidden windows first.
     QTimer::singleShot(150, this, &PortalScreenshotJob::start);
@@ -46,14 +59,15 @@ void PortalScreenshotJob::start()
         watcher->deleteLater();
         if (m_done) return;
         if (reply.isError()) {
-            finish({ErrorCode::Configuration, QStringLiteral("桌面截图服务不可用，请安装或检查 xdg-desktop-portal 和 xdg-desktop-portal-kde。")});
+            finish(dbusFailure(reply.error(), PlatformErrorCode::Unavailable,
+                QStringLiteral("桌面截图服务不可用，请安装或检查 xdg-desktop-portal 和 xdg-desktop-portal-kde。")));
             return;
         }
         const auto properties = reply.value();
         const uint version = properties.value("version").toUInt();
         const uint targets = properties.value("AvailableTargets").toUInt();
         if (version < 3 || !(targets & 4)) {
-            finish({ErrorCode::Configuration, QStringLiteral("当前桌面 Portal 不支持区域截图。请使用 Plasma X11，或升级到支持区域截图的桌面后端。")});
+            finish({PlatformErrorCode::Unsupported, QStringLiteral("当前桌面 Portal 不支持区域截图。请使用 Plasma X11，或升级到支持区域截图的桌面后端。")});
             return;
         }
         request(version, targets);
@@ -68,24 +82,32 @@ void PortalScreenshotJob::request(uint version, uint targets)
     m_path = "/org/freedesktop/portal/desktop/request/" + sender + '/' + token;
     // Subscribe before calling Screenshot: a backend may emit Response before the method reply.
     if (!m_bus.connect(m_service, m_path, requestInterface, QStringLiteral("Response"), this, SLOT(response(uint,QVariantMap)))) {
-        finish({ErrorCode::Network, QStringLiteral("无法监听桌面截图结果。")}); return;
+        finish({PlatformErrorCode::Failed, QStringLiteral("无法监听桌面截图结果。")}); return;
     }
     auto message = QDBusMessage::createMethodCall(m_service, desktopPath, screenshotInterface, QStringLiteral("Screenshot"));
     message << QString() << captureOptions(version, targets, token);
-    auto *watcher = new QDBusPendingCallWatcher(m_bus.asyncCall(message, 10000), this);
-    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher] {
+    // The method reply may arrive after cancellation or owner destruction. Keep just
+    // this watcher alive to close the actual handle, even if it differs from our token.
+    auto *watcher = new QDBusPendingCallWatcher(m_bus.asyncCall(message, 10000), QCoreApplication::instance());
+    connect(watcher, &QDBusPendingCallWatcher::finished, watcher,
+        [job = QPointer<PortalScreenshotJob>(this), watcher, bus = m_bus, service = m_service]() mutable {
         QDBusPendingReply<QDBusObjectPath> reply = *watcher;
         watcher->deleteLater();
-        if (m_done) return;
+        if (!job || job->m_done) {
+            if (!reply.isError())
+                bus.asyncCall(QDBusMessage::createMethodCall(service, reply.value().path(), requestInterface, QStringLiteral("Close")));
+            return;
+        }
         if (reply.isError()) {
-            finish({ErrorCode::Network, QStringLiteral("无法启动系统截图，请检查桌面截图服务。")}); return;
+            job->finish(dbusFailure(reply.error(), PlatformErrorCode::Failed,
+                QStringLiteral("无法启动系统截图，请检查桌面截图服务。"))); return;
         }
         const auto actual = reply.value().path();
-        if (actual != m_path) {
-            m_bus.disconnect(m_service, m_path, requestInterface, QStringLiteral("Response"), this, SLOT(response(uint,QVariantMap)));
-            m_path = actual;
-            if (!m_bus.connect(m_service, m_path, requestInterface, QStringLiteral("Response"), this, SLOT(response(uint,QVariantMap))))
-                finish({ErrorCode::Network, QStringLiteral("无法监听桌面截图结果。")});
+        if (actual != job->m_path) {
+            bus.disconnect(service, job->m_path, requestInterface, QStringLiteral("Response"), job, SLOT(response(uint,QVariantMap)));
+            job->m_path = actual;
+            if (!bus.connect(service, job->m_path, requestInterface, QStringLiteral("Response"), job, SLOT(response(uint,QVariantMap))))
+                job->finish({PlatformErrorCode::Failed, QStringLiteral("无法监听桌面截图结果。")});
         }
     });
 }
@@ -116,12 +138,12 @@ void PortalScreenshotJob::response(uint code, const QVariantMap &results)
     if (m_done) return;
     // The portal owns the returned file; never delete an arbitrary URI supplied by it.
     if (code != 0) {
-        finish({code == 1 ? ErrorCode::Cancelled : ErrorCode::Network,
+        finish({code == 1 ? PlatformErrorCode::Cancelled : PlatformErrorCode::Failed,
                 code == 1 ? QStringLiteral("截图已取消。") : QStringLiteral("系统截图失败，请重新截图。")}); return;
     }
     QString error;
     const auto image = readImage(results.value("uri").toString(), &error);
-    if (!error.isEmpty()) { finish({ErrorCode::InvalidResponse, error}); return; }
+    if (!error.isEmpty()) { finish({PlatformErrorCode::Failed, error}); return; }
     m_done = true;
     m_timer.stop();
     m_bus.disconnect(m_service, m_path, requestInterface, QStringLiteral("Response"), this, SLOT(response(uint,QVariantMap)));
@@ -137,7 +159,7 @@ void PortalScreenshotJob::closeRequest()
     m_bus.asyncCall(QDBusMessage::createMethodCall(m_service, m_path, requestInterface, QStringLiteral("Close")));
     m_path.clear();
 }
-void PortalScreenshotJob::finish(const TranslationError &error)
+void PortalScreenshotJob::finish(const PlatformError &error)
 {
     if (m_done) return;
     m_done = true;
@@ -146,5 +168,5 @@ void PortalScreenshotJob::finish(const TranslationError &error)
     emit failed(error);
     deleteLater();
 }
-void PortalScreenshotJob::cancel() { finish({ErrorCode::Cancelled, QStringLiteral("截图已取消。")}); }
+void PortalScreenshotJob::cancel() { finish({PlatformErrorCode::Cancelled, QStringLiteral("截图已取消。")}); }
 } // namespace Trans

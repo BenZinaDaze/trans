@@ -41,9 +41,18 @@ ApplicationWindow {
         return draft
     }
     function saveAll() {
-        saved = desktop.saveSettings(collect())
-        feedback = saved ? "所有设置已保存。下一次翻译将使用新配置。" : desktop.settingsError
-        return saved
+        if (desktop.settingsBusy) return
+        saved = false
+        feedback = ""
+        desktop.saveSettings(collect())
+    }
+    Connections {
+        target: root.desktop
+        function onSettingsSaveFinished(success) {
+            if (success && root.visible) root.reload()
+            root.saved = success
+            root.feedback = success ? "所有设置已保存。下一次翻译将使用新配置。" : root.desktop.settingsError
+        }
     }
     onVisibleChanged: {
         if (desktop.captureActive) return
@@ -189,6 +198,7 @@ ApplicationWindow {
                 }
             }
             StackLayout {
+                enabled: !root.desktop.settingsBusy
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Layout.leftMargin: root.narrow ? 16 : 26
@@ -213,7 +223,7 @@ ApplicationWindow {
                     objectName: "desktopPage"
                     desktop: root.desktop
                 }
-                OcrPage { id: ocrPage; objectName: "ocrPage" }
+                OcrPage { id: ocrPage; objectName: "ocrPage"; desktop: root.desktop }
             }
             Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: ui.line }
             Pane {
@@ -244,13 +254,13 @@ ApplicationWindow {
                             wrapMode: Text.Wrap
                         }
                         Item { visible: root.narrow; Layout.fillWidth: true }
-                        UiButton { text: "放弃修改"; quiet: true; onClicked: root.reload() }
+                        UiButton { text: "放弃修改"; quiet: true; enabled: !root.desktop.settingsBusy; onClicked: root.reload() }
                         UiButton {
-                            text: "保存全部"
+                            text: root.desktop.settingsBusy ? "正在保存…" : "保存全部"
                             symbol: "check"
                             objectName: "saveAllButton"
                             highlighted: true
-                            enabled: !desktopPage.recording && !desktopPage.recordingScreenshot
+                            enabled: !root.desktop.settingsBusy && !desktopPage.recording && !desktopPage.recordingScreenshot
                             onClicked: root.saveAll()
                         }
                     }

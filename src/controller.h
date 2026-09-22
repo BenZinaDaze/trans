@@ -3,6 +3,7 @@
 #include "settings.h"
 #include "ocr.h"
 #include "screenshot.h"
+#include "platform/selection_reader.h"
 #include <QPointer>
 
 namespace Trans {
@@ -33,7 +34,8 @@ public:
     QString status() const { return m_status; }
     QString message() const { return m_message; }
     bool sourceIsOcr() const { return m_sourceIsOcr; }
-    bool busy() const { return m_status == "loading" || m_status == "capturing" || m_status == "recognizing"; }
+    bool busy() const { return m_status == "selecting" || m_status == "loading" || m_status == "capturing" || m_status == "recognizing"; }
+    void translateSelection(SelectionJob *job);
     void translateScreenshot(ScreenshotJob *job);
     void translateText(const QString &text);
     void selectionError(const QString &message);
@@ -42,12 +44,14 @@ public:
 signals:
     void stateChanged();
     void captureFinished(bool cancelled);
+    void selectionFinished(const Trans::SourceContextPtr &source, bool cancelled);
 private:
     void startTranslation(const QString &text, bool sourceIsOcr);
     void invalidateRequest();
     ProviderRegistry &m_registry;
     AppSettings &m_settings;
     QPointer<TranslationJob> m_job;
+    QPointer<SelectionJob> m_selectionJob;
     BaiduOcrProvider m_ocr;
     BaiduOcrProvider *m_ocrProvider;
     QPointer<OcrJob> m_ocrJob;

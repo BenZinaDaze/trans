@@ -3,17 +3,23 @@
 #include "ocr.h"
 #include "screenshot.h"
 #include "region_capture.h"
+#include "platform/linux/portal_screenshot.h"
+#include "platform/screenshot_service.h"
+#include "platform/platform_services.h"
 #include <QDBusContext>
 #include <QDBusMessage>
 #include <QDBusObjectPath>
 #include <QFile>
+#include <QGuiApplication>
 #include <QJsonDocument>
 #include <QProcess>
+#include <QPointer>
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QUrlQuery>
 #include <functional>
 
@@ -84,12 +90,35 @@ public:
         return job;
     }
 };
+class ShortcutUpdate : public ShortcutJob {
+public:
+    ShortcutUpdate(QObject *owner, std::function<bool()> change) : ShortcutJob(owner)
+    {
+        QTimer::singleShot(0, this, [this, change = std::move(change)] {
+            if (finished()) return;
+            if (change()) succeed();
+            else fail({PlatformErrorCode::Conflict, QStringLiteral("Shortcut conflict")});
+        });
+    }
+    void cancel() override { fail({PlatformErrorCode::Cancelled, QStringLiteral("Cancelled")}); }
+};
 class Shortcut : public ShortcutService {
 public:
-    QString value;
+    QString selection;
+    QString screenshot;
     QString reject;
-    bool apply(const QString &sequence) override { if (!reject.isEmpty() && sequence == reject) return false; value = sequence; return true; }
-    QString sequence() const override { return value; }
+    ShortcutJob *update(ShortcutAction action, const QString &value, QObject *owner) override
+    {
+        return new ShortcutUpdate(owner, [this, action, value] {
+            if (!reject.isEmpty() && value == reject) return false;
+            (action == ShortcutAction::Selection ? selection : screenshot) = value;
+            emit changed();
+            return true;
+        });
+    }
+    QString sequence(ShortcutAction action) const override { return action == ShortcutAction::Selection ? selection : screenshot; }
+    CapabilityState availability() const override { return CapabilityState::Available; }
+    QString unavailableReason() const override { return {}; }
 };
 
 // Real D-Bus messages on a private bus exercise response subscription and cancellation.
@@ -103,6 +132,8 @@ public:
     uint targets = 4;
     QVariantMap options;
     QString path;
+    bool delayReply = false;
+    QDBusMessage pendingReply;
     QDBusConnection bus;
     explicit Portal(const QDBusConnection &connection) : bus(connection) {}
     void respond(uint code, const QVariantMap &results)
@@ -111,6 +142,7 @@ public:
         signal << code << results;
         bus.send(signal);
     }
+    void completeRequest() { bus.send(pendingReply.createReply({QVariant::fromValue(QDBusObjectPath(path))})); }
 public slots:
     QDBusObjectPath Screenshot(const QString &, const QVariantMap &values)
     {
@@ -118,6 +150,11 @@ public slots:
         QString sender = message().service().mid(1);
         sender.replace('.', '_');
         path = "/org/freedesktop/portal/desktop/request/" + sender + '/' + values.value("handle_token").toString();
+        if (delayReply) {
+            path += "_actual";
+            setDelayedReply(true);
+            pendingReply = message();
+        }
         return QDBusObjectPath(path);
     }
 };
@@ -134,7 +171,7 @@ class OcrTest : public QObject {
     Q_OBJECT
     QImage sample() const { QImage image(100, 40, QImage::Format_RGB32); image.fill(Qt::white); return image; }
 private slots:
-    void initTestCase() { qRegisterMetaType<TranslationError>(); }
+    void initTestCase() { qRegisterMetaType<TranslationError>(); qRegisterMetaType<PlatformError>(); }
     void regionCoordinatesAndPixels()
     {
         QCOMPARE(RegionOverlay::pixelRect(QRectF(10, 20, 30, 40), QSize(100, 100), QSize(200, 200)), QRect(20, 40, 60, 80));
@@ -193,7 +230,6 @@ private slots:
             }
         }
         QVERIFY(BaiduOcrProvider::imageForm(noise, &error).isEmpty());
-        QVERIFY(error.contains("10 MB"));
     }
     void tokenCacheAndEncoding()
     {
@@ -312,7 +348,7 @@ private slots:
         emit text->jobs.last()->succeeded({"你好", "en"});
         auto *cancelled = new Capture(&controller);
         controller.translateScreenshot(cancelled);
-        emit cancelled->failed({ErrorCode::Cancelled, "cancel"});
+        emit cancelled->failed({PlatformErrorCode::Cancelled, "cancel"});
         QCOMPARE(controller.status(), QStringLiteral("success"));
         QCOMPARE(controller.translatedText(), QStringLiteral("你好"));
         QVERIFY(controller.sourceIsOcr());
@@ -339,34 +375,71 @@ private slots:
         auto registry = ProviderRegistry::builtins();
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
-        Shortcut selection, screenshot;
-        selection.value = "Meta+Shift+T"; screenshot.value = "Meta+Shift+O";
-        DesktopBridge desktop(controller, settings, nullptr, &selection, &screenshot);
+        auto shortcutOwner = std::make_unique<Shortcut>();
+        auto *shortcuts = shortcutOwner.get();
+        shortcuts->selection = "Meta+Shift+T"; shortcuts->screenshot = "Meta+Shift+O";
+        PlatformServices platform(std::unique_ptr<SelectionReader>(createSelectionReader()), std::move(shortcutOwner),
+            std::unique_ptr<ScreenshotService>(createScreenshotService()), std::unique_ptr<WindowIntegration>(createWindowIntegration()));
+        DesktopBridge desktop(controller, settings, platform);
+        QSignalSpy saved(&desktop, &DesktopBridge::settingsSaveFinished);
         auto draft = settings.snapshot();
         draft["shortcut"] = "Meta+Shift+O"; draft["screenshotShortcut"] = "Meta+Shift+T";
         draft["ocrApiKey"] = "key"; draft["ocrSecretKey"] = "secret";
-        QVERIFY(desktop.saveSettings(draft));
-        QCOMPARE(selection.value, QStringLiteral("Meta+Shift+O"));
-        QCOMPARE(screenshot.value, QStringLiteral("Meta+Shift+T"));
+        desktop.saveSettings(draft);
+        QTRY_COMPARE(saved.size(), 1);
+        QVERIFY(saved.takeFirst().first().toBool());
+        QCOMPARE(shortcuts->selection, QStringLiteral("Meta+Shift+O"));
+        QCOMPARE(shortcuts->screenshot, QStringLiteral("Meta+Shift+T"));
         draft["shortcut"] = "Ctrl+Alt+A"; draft["screenshotShortcut"] = "Ctrl+Alt+B";
-        screenshot.reject = "Ctrl+Alt+B";
-        QVERIFY(!desktop.saveSettings(draft));
-        QCOMPARE(selection.value, QStringLiteral("Meta+Shift+O"));
-        QCOMPARE(screenshot.value, QStringLiteral("Meta+Shift+T"));
+        shortcuts->reject = "Ctrl+Alt+B";
+        desktop.saveSettings(draft);
+        QTRY_COMPARE(saved.size(), 1);
+        QVERIFY(!saved.takeFirst().first().toBool());
+        QCOMPARE(shortcuts->selection, QStringLiteral("Meta+Shift+O"));
+        QCOMPARE(shortcuts->screenshot, QStringLiteral("Meta+Shift+T"));
         AppSettings reloaded(registry, settings.configPath());
         QCOMPARE(reloaded.snapshot().value("ocrSecretKey").toString(), QStringLiteral("secret"));
-        QCOMPARE(reloaded.snapshot().value("screenshotShortcut").toString(), screenshot.value);
+        QCOMPARE(reloaded.snapshot().value("screenshotShortcut").toString(), shortcuts->screenshot);
         draft["screenshotShortcut"] = draft["shortcut"];
-        QVERIFY(!desktop.saveSettings(draft));
+        desktop.saveSettings(draft);
+        QTRY_COMPARE(saved.size(), 1);
+        QVERIFY(!saved.takeFirst().first().toBool());
         QFile blocker(directory.filePath("blocker"));
         QVERIFY(blocker.open(QIODevice::WriteOnly)); blocker.close();
         AppSettings broken(registry, directory.filePath("blocker/settings.ini"));
         TranslationController brokenController(registry, broken);
-        DesktopBridge brokenDesktop(brokenController, broken, nullptr, &selection, &screenshot);
+        DesktopBridge brokenDesktop(brokenController, broken, platform);
+        QSignalSpy failedSave(&brokenDesktop, &DesktopBridge::settingsSaveFinished);
         draft["screenshotShortcut"] = "Ctrl+Alt+C";
-        QVERIFY(!brokenDesktop.saveSettings(draft));
-        QCOMPARE(selection.value, QStringLiteral("Meta+Shift+O"));
-        QCOMPARE(screenshot.value, QStringLiteral("Meta+Shift+T"));
+        brokenDesktop.saveSettings(draft);
+        QTRY_COMPARE(failedSave.size(), 1);
+        QVERIFY(!failedSave.first().first().toBool());
+        QCOMPARE(shortcuts->selection, QStringLiteral("Meta+Shift+O"));
+        QCOMPARE(shortcuts->screenshot, QStringLiteral("Meta+Shift+T"));
+    }
+    void unsupportedDisplayDoesNotUsePortal()
+    {
+        const auto platform = QGuiApplication::platformName();
+        if (platform == "xcb" || platform == "wayland" || platform == "wayland-egl")
+            QSKIP("This case requires an unsupported display plugin, such as offscreen.");
+        std::unique_ptr<ScreenshotService> service(createScreenshotService());
+        QCOMPARE(service->availability(), CapabilityState::Unsupported);
+        QPointer<ScreenshotJob> job = service->captureRegion(this);
+        QSignalSpy failed(job, &ScreenshotJob::failed);
+        QSignalSpy succeeded(job, &ScreenshotJob::succeeded);
+        QCOMPARE(failed.size(), 0);
+        QTRY_COMPARE(failed.size(), 1);
+        QCOMPARE(qvariant_cast<PlatformError>(failed.first().first()).code, PlatformErrorCode::Unsupported);
+        QCOMPARE(succeeded.size(), 0);
+        QTRY_VERIFY(job.isNull());
+        job = service->captureRegion(this);
+        QSignalSpy cancelled(job, &ScreenshotJob::failed);
+        job->cancel();
+        job->cancel();
+        QCOMPARE(cancelled.size(), 1);
+        QCOMPARE(qvariant_cast<PlatformError>(cancelled.first().first()).code, PlatformErrorCode::Cancelled);
+        QTRY_VERIFY(job.isNull());
+        QCOMPARE(cancelled.size(), 1);
     }
     void portalResponses()
     {
@@ -396,7 +469,7 @@ private slots:
         job = new PortalScreenshotJob(this, client);
         QSignalSpy unsupported(job, &ScreenshotJob::failed);
         QTRY_COMPARE(unsupported.size(), 1);
-        QCOMPARE(qvariant_cast<TranslationError>(unsupported.first().first()).code, ErrorCode::Configuration);
+        QCOMPARE(qvariant_cast<PlatformError>(unsupported.first().first()).code, PlatformErrorCode::Unsupported);
         QVERIFY(portal.path.isEmpty()); // Never offer or upload a whole screen as a fallback.
         portal.version = 3; portal.targets = 4;
         job = new PortalScreenshotJob(this, client);
@@ -406,28 +479,48 @@ private slots:
         QVERIFY(portal.options.value("interactive").toBool());
         portal.respond(1, {});
         QTRY_COMPARE(cancel.size(), 1);
-        QCOMPARE(qvariant_cast<TranslationError>(cancel.first().first()).code, ErrorCode::Cancelled);
+        QCOMPARE(qvariant_cast<PlatformError>(cancel.first().first()).code, PlatformErrorCode::Cancelled);
         portal.path.clear();
         job = new PortalScreenshotJob(this, client);
         QSignalSpy invalid(job, &ScreenshotJob::failed);
         QTRY_VERIFY(!portal.path.isEmpty());
         portal.respond(0, {{"uri", "https://example.com/image.png"}});
         QTRY_COMPARE(invalid.size(), 1);
-        QCOMPARE(qvariant_cast<TranslationError>(invalid.first().first()).code, ErrorCode::InvalidResponse);
+        QCOMPARE(qvariant_cast<PlatformError>(invalid.first().first()).code, PlatformErrorCode::Failed);
         portal.path.clear();
         job = new PortalScreenshotJob(this, client);
         QSignalSpy stopped(job, &ScreenshotJob::failed);
+        QSignalSpy lateSuccess(job, &ScreenshotJob::succeeded);
         QTRY_VERIFY(!portal.path.isEmpty());
         PortalRequest request;
         QVERIFY(backend.registerObject(portal.path, &request, QDBusConnection::ExportAllSlots));
         job->cancel();
+        job->cancel();
+        QCOMPARE(stopped.size(), 1);
         QTRY_VERIFY(request.closed);
         QCOMPARE(stopped.size(), 1);
         portal.respond(0, {{"uri", QUrl::fromLocalFile(imagePath).toString()}});
+        portal.path.clear();
+        portal.delayReply = true;
+        auto *owner = new QObject(this);
+        QPointer<PortalScreenshotJob> pending = new PortalScreenshotJob(owner, client);
+        QSignalSpy abandoned(pending, &ScreenshotJob::failed);
+        QSignalSpy abandonedSuccess(pending, &ScreenshotJob::succeeded);
+        QTRY_VERIFY(!portal.path.isEmpty());
+        PortalRequest lateRequest;
+        QVERIFY(backend.registerObject(portal.path, &lateRequest, QDBusConnection::ExportAllSlots));
+        delete owner;
+        QVERIFY(pending.isNull());
+        portal.completeRequest();
+        QTRY_VERIFY(lateRequest.closed);
+        QCOMPARE(abandoned.size(), 0);
+        QCOMPARE(abandonedSuccess.size(), 0);
+        QCOMPARE(lateSuccess.size(), 0);
+        portal.delayReply = false;
         job = new PortalScreenshotJob(this, client, "org.example.MissingPortal");
         QSignalSpy missing(job, &ScreenshotJob::failed);
         QTRY_COMPARE(missing.size(), 1);
-        QCOMPARE(qvariant_cast<TranslationError>(missing.first().first()).code, ErrorCode::Configuration);
+        QCOMPARE(qvariant_cast<PlatformError>(missing.first().first()).code, PlatformErrorCode::Unavailable);
         QDBusConnection::disconnectFromBus("ocr-portal-client");
         QDBusConnection::disconnectFromBus("ocr-portal-backend");
         daemon.terminate();

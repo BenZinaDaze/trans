@@ -15,6 +15,11 @@ TranslationController::~TranslationController()
 void TranslationController::invalidateRequest()
 {
     ++m_generation;
+    if (m_selectionJob) {
+        auto previous = m_selectionJob;
+        m_selectionJob.clear();
+        previous->cancel();
+    }
     if (m_captureJob) {
         auto previous = m_captureJob;
         m_captureJob.clear();
@@ -30,6 +35,34 @@ void TranslationController::invalidateRequest()
         m_job.clear();
         previous->cancel();
     }
+}
+
+void TranslationController::translateSelection(SelectionJob *job)
+{
+    invalidateRequest();
+    m_selectionJob = job;
+    m_status = QStringLiteral("selecting");
+    const auto generation = m_generation;
+    connect(job, &SelectionJob::succeeded, this, [this, generation](const SelectionResult &result) {
+        if (generation != m_generation) return;
+        m_selectionJob.clear();
+        startTranslation(result.text, false);
+        if (m_generation == generation + 1) emit selectionFinished(result.source, false);
+    });
+    connect(job, &SelectionJob::failed, this, [this, generation](const PlatformError &error) {
+        if (generation != m_generation) return;
+        m_selectionJob.clear();
+        if (error.code == PlatformErrorCode::Cancelled) {
+            ++m_generation;
+            m_status = QStringLiteral("cancelled");
+            m_message = error.message;
+            emit stateChanged();
+        } else {
+            selectionError(error.message);
+        }
+        if (m_generation == generation + 1) emit selectionFinished({}, error.code == PlatformErrorCode::Cancelled);
+    });
+    emit stateChanged();
 }
 
 void TranslationController::translateText(const QString &text)
@@ -139,18 +172,19 @@ void TranslationController::translateScreenshot(ScreenshotJob *job)
             selectionError(error.message);
         });
         emit stateChanged();
-        emit captureFinished(false);
+        if (generation == m_generation) emit captureFinished(false);
     });
-    connect(job, &ScreenshotJob::failed, this, [this, generation](const TranslationError &error) {
+    connect(job, &ScreenshotJob::failed, this, [this, generation](const PlatformError &error) {
         if (generation != m_generation) return;
         m_captureJob.clear();
-        if (error.code == ErrorCode::Cancelled) {
+        if (error.code == PlatformErrorCode::Cancelled) {
+            ++m_generation;
             m_status = m_beforeCaptureStatus;
             emit stateChanged();
         } else {
             selectionError(error.message);
         }
-        emit captureFinished(error.code == ErrorCode::Cancelled);
+        if (m_generation == generation + 1) emit captureFinished(error.code == PlatformErrorCode::Cancelled);
     });
     emit stateChanged();
 }
@@ -162,10 +196,10 @@ void TranslationController::retry()
 
 void TranslationController::cancel()
 {
-    if (!busy())
-        return;
+    const bool wasBusy = busy();
     const bool capturing = m_status == "capturing";
     invalidateRequest();
+    if (!wasBusy) return;
     if (capturing) {
         m_status = m_beforeCaptureStatus;
         emit stateChanged();

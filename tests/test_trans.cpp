@@ -1,5 +1,9 @@
 #include "controller.h"
 #include "desktop.h"
+#include "platform/platform_services.h"
+#include "platform/selection_reader.h"
+#include "platform/shortcut_service.h"
+#include "platform/linux/instance_channel_linux.h"
 #include "providers.h"
 #include "settings.h"
 #include "provider_tools.h"
@@ -105,26 +109,108 @@ public:
     }
 };
 
+class TestShortcutJob final : public ShortcutJob {
+public:
+    using ShortcutJob::ShortcutJob;
+    void cancel() override { fail({PlatformErrorCode::Cancelled, "Cancelled"}); }
+    void complete(bool accepted) {
+        if (accepted) succeed();
+        else fail({PlatformErrorCode::Conflict, "Occupied"});
+    }
+};
+
 class TestShortcut final : public ShortcutService {
 public:
-    QString value = QStringLiteral("Meta+Shift+T");
-    QStringList attempts;
+    QMap<ShortcutAction, QString> values{{ShortcutAction::Selection, "Meta+Shift+T"},
+                                        {ShortcutAction::Screenshot, "Meta+Shift+O"}};
     bool reject = false;
-    void initialize(const QString &requested) override { value = requested; }
-    bool apply(const QString &requested) override
+    ShortcutJob *update(ShortcutAction action, const QString &requested, QObject *owner) override
     {
-        attempts.append(requested);
-        if (reject)
-            return false;
-        value = requested;
-        return true;
+        auto *job = new TestShortcutJob(owner);
+        QTimer::singleShot(0, job, [this, job, action, requested] {
+            if (!reject) values[action] = requested;
+            job->complete(!reject);
+        });
+        return job;
     }
-    QString sequence() const override { return value; }
+    QString sequence(ShortcutAction action) const override { return values.value(action); }
+    CapabilityState availability() const override { return CapabilityState::Available; }
+    QString unavailableReason() const override { return {}; }
+};
+
+class PendingScreenshot final : public ScreenshotJob {
+public:
+    using ScreenshotJob::ScreenshotJob;
+    void cancel() override {
+        emit failed({PlatformErrorCode::Cancelled, "Cancelled"});
+        deleteLater();
+    }
+};
+
+class TestScreenshots final : public ScreenshotService {
+public:
+    ScreenshotJob *captureRegion(QObject *owner) override { return new PendingScreenshot(owner); }
+    CapabilityState availability() const override { return CapabilityState::Available; }
+    QString unavailableReason() const override { return {}; }
+};
+
+static std::unique_ptr<PlatformServices> testPlatform(TestShortcut **shortcut)
+{
+    auto keys = std::make_unique<TestShortcut>();
+    *shortcut = keys.get();
+    return std::make_unique<PlatformServices>(
+        std::unique_ptr<SelectionReader>(createSelectionReader()), std::move(keys),
+        std::make_unique<TestScreenshots>(),
+        std::unique_ptr<WindowIntegration>(createWindowIntegration()));
+}
+
+class DelayedSelection final : public SelectionJob {
+public:
+    using SelectionJob::SelectionJob;
+    bool cancelled = false;
+    void cancel() override { cancelled = true; }
+    void deliver(const QString &text) { emit succeeded({text, {}}); }
 };
 
 class TransTest : public QObject {
     Q_OBJECT
 private slots:
+    void staleSelectionCannotStartTranslation()
+    {
+        QTemporaryDir directory;
+        ProviderRegistry registry;
+        auto provider = std::make_unique<ManualProvider>();
+        auto *manual = provider.get();
+        registry.add(std::move(provider));
+        AppSettings settings(registry, directory.filePath("settings.ini"));
+        TranslationController controller(registry, settings);
+        QSignalSpy finished(&controller, &TranslationController::selectionFinished);
+        auto *cancelled = new DelayedSelection(&controller);
+        controller.translateSelection(cancelled);
+        QVERIFY(controller.busy());
+        controller.cancel();
+        QVERIFY(cancelled->cancelled);
+        const auto notifications = finished.size();
+        cancelled->deliver("stale after close");
+        QVERIFY(manual->requests.isEmpty());
+        QCOMPARE(finished.size(), notifications);
+
+        auto *old = new DelayedSelection(&controller);
+        auto *current = new DelayedSelection(&controller);
+        controller.translateSelection(old);
+        controller.translateSelection(current);
+        QVERIFY(old->cancelled);
+        old->deliver("replaced selection");
+        QVERIFY(manual->requests.isEmpty());
+        current->deliver("current selection");
+        QCOMPARE(manual->requests.size(), 1);
+        QCOMPARE(manual->requests.first().text, QStringLiteral("current selection"));
+        manual->jobs.first()->succeed("current result");
+        old->deliver("late old selection");
+        QCOMPARE(controller.translatedText(), QStringLiteral("current result"));
+        QCOMPARE(manual->requests.size(), 1);
+    }
+
     void trayReopensWithoutTranslating()
     {
         QTemporaryDir directory;
@@ -134,10 +220,9 @@ private slots:
         registry.add(std::move(provider));
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
-        TestShortcut shortcut;
-        TestShortcut screenshotShortcut;
-        screenshotShortcut.value = QStringLiteral("Meta+Shift+O");
-        DesktopBridge desktop(controller, settings, nullptr, &shortcut, &screenshotShortcut);
+        TestShortcut *shortcut;
+        auto platform = testPlatform(&shortcut);
+        DesktopBridge desktop(controller, settings, *platform);
         QWindow popup;
         QWindow settingsWindow;
         desktop.setWindows(&popup, &settingsWindow);
@@ -253,7 +338,8 @@ private slots:
         values["providerConfigs"] = configs;
         QVERIFY(settings.save(values));
         TranslationController controller(registry, settings);
-        DesktopBridge desktop(controller, settings);
+        auto platform = createPlatformServices();
+        DesktopBridge desktop(controller, settings, *platform);
         ProviderTools tools(registry);
         QQmlApplicationEngine engine;
         QSignalSpy warnings(&engine, &QQmlEngine::warnings);
@@ -395,7 +481,8 @@ private slots:
         registry.add(std::move(provider));
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
-        DesktopBridge desktop(controller, settings);
+        auto platform = createPlatformServices();
+        DesktopBridge desktop(controller, settings, *platform);
         ProviderTools tools(registry);
         QQmlApplicationEngine engine;
         QSignalSpy warnings(&engine, &QQmlEngine::warnings);
@@ -495,7 +582,8 @@ private slots:
         auto registry = ProviderRegistry::builtins();
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
-        DesktopBridge desktop(controller, settings);
+        auto platform = createPlatformServices();
+        DesktopBridge desktop(controller, settings, *platform);
         ProviderTools tools(registry);
         QQmlApplicationEngine engine;
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
@@ -583,7 +671,9 @@ private slots:
         registry.add(std::move(provider));
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
-        DesktopBridge desktop(controller, settings);
+        TestShortcut *shortcut;
+        auto platform = testPlatform(&shortcut);
+        DesktopBridge desktop(controller, settings, *platform);
         ProviderTools tools(registry);
         QQmlApplicationEngine engine;
         engine.setInitialProperties({{"appSettings", QVariant::fromValue(&settings)},
@@ -647,32 +737,42 @@ private slots:
         auto registry = ProviderRegistry::builtins();
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
-        TestShortcut shortcut;
-        TestShortcut screenshotShortcut;
-        screenshotShortcut.value = QStringLiteral("Meta+Shift+O");
-        DesktopBridge desktop(controller, settings, nullptr, &shortcut, &screenshotShortcut);
+        TestShortcut *shortcut;
+        auto platform = testPlatform(&shortcut);
+        DesktopBridge desktop(controller, settings, *platform);
+        QSignalSpy saved(&desktop, &DesktopBridge::settingsSaveFinished);
         auto draft = settings.snapshot();
         draft["shortcut"] = "Ctrl+Alt+Y";
-        shortcut.reject = true;
-        QVERIFY(!desktop.saveSettings(draft));
+        shortcut->reject = true;
+        desktop.saveSettings(draft);
+        QTRY_COMPARE(saved.size(), 1);
+        QVERIFY(!saved.takeFirst().first().toBool());
         QVERIFY(!QFile::exists(settings.configPath()));
         QCOMPARE(settings.shortcut(), QStringLiteral("Meta+Shift+T"));
-        shortcut.reject = false;
+        shortcut->reject = false;
         // A regular file as the parent directory forces a real persistence error.
         QFile blocker(directory.filePath("blocker"));
         QVERIFY(blocker.open(QIODevice::WriteOnly));
         blocker.close();
         AppSettings broken(registry, directory.filePath("blocker/settings.ini"));
         TranslationController brokenController(registry, broken);
-        DesktopBridge brokenDesktop(brokenController, broken, nullptr, &shortcut, &screenshotShortcut);
-        QVERIFY(!brokenDesktop.saveSettings(draft));
-        QCOMPARE(shortcut.attempts.last(), QStringLiteral("Meta+Shift+T"));
-        QCOMPARE(shortcut.value, QStringLiteral("Meta+Shift+T"));
-        QVERIFY(desktop.saveSettings(draft));
-        QCOMPARE(shortcut.value, QStringLiteral("Ctrl+Alt+Y"));
+        DesktopBridge brokenDesktop(brokenController, broken, *platform);
+        QSignalSpy brokenSaved(&brokenDesktop, &DesktopBridge::settingsSaveFinished);
+        brokenDesktop.saveSettings(draft);
+        QTRY_COMPARE(brokenSaved.size(), 1);
+        QVERIFY(!brokenSaved.first().first().toBool());
+        QCOMPARE(shortcut->sequence(ShortcutAction::Selection), QStringLiteral("Meta+Shift+T"));
+        desktop.saveSettings(draft);
+        QTRY_COMPARE(saved.size(), 1);
+        QVERIFY(saved.takeFirst().first().toBool());
+        QCOMPARE(shortcut->sequence(ShortcutAction::Selection), QStringLiteral("Ctrl+Alt+Y"));
+        QCOMPARE(settings.shortcut(), QStringLiteral("Ctrl+Alt+Y"));
         draft["shortcut"] = "";
-        QVERIFY(desktop.saveSettings(draft));
-        QVERIFY(shortcut.value.isEmpty());
+        desktop.saveSettings(draft);
+        QTRY_COMPARE(saved.size(), 1);
+        QVERIFY(saved.first().first().toBool());
+        QVERIFY(shortcut->sequence(ShortcutAction::Selection).isEmpty());
+        QVERIFY(settings.shortcut().isEmpty());
     }
 
     void responsesMustBeComplete()
@@ -791,7 +891,9 @@ private slots:
         auto registry = ProviderRegistry::builtins();
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
-        DesktopBridge desktop(controller, settings);
+        TestShortcut *shortcut;
+        auto platform = testPlatform(&shortcut);
+        DesktopBridge desktop(controller, settings, *platform);
         ProviderTools tools(registry);
         QQmlApplicationEngine engine;
         QSignalSpy warnings(&engine, &QQmlEngine::warnings);
@@ -864,9 +966,10 @@ private slots:
         QVERIFY(!desktopPage->property("recordingScreenshot").toBool());
         QVERIFY(set("ocrApiKeyField", "text", "ocr-key"));
         QVERIFY(set("ocrSecretKeyField", "text", "ocr-secret"));
-        QVariant saved;
-        QVERIFY(QMetaObject::invokeMethod(window, "saveAll", Q_RETURN_ARG(QVariant, saved)));
-        QVERIFY2(saved.toBool(), qPrintable(desktop.settingsError()));
+        QSignalSpy saved(&desktop, &DesktopBridge::settingsSaveFinished);
+        QVERIFY(QMetaObject::invokeMethod(window, "saveAll"));
+        QTRY_COMPARE(saved.size(), 1);
+        QVERIFY2(saved.takeFirst().first().toBool(), qPrintable(desktop.settingsError()));
         const auto expected = settings.snapshot();
         QCOMPARE(expected.value("ocrApiKey").toString(), QStringLiteral("ocr-key"));
         QCOMPARE(expected.value("ocrSecretKey").toString(), QStringLiteral("ocr-secret"));
@@ -914,8 +1017,9 @@ private slots:
         QTRY_VERIFY(!popup->isVisible());
         // A bad advanced parameter must fail in the page and leave saved settings intact.
         QVERIFY(set("optionsField", "text", R"({"stream":true})"));
-        QVERIFY(QMetaObject::invokeMethod(window, "saveAll", Q_RETURN_ARG(QVariant, saved)));
-        QVERIFY(!saved.toBool());
+        QVERIFY(QMetaObject::invokeMethod(window, "saveAll"));
+        QTRY_COMPARE(saved.size(), 1);
+        QVERIFY(!saved.first().first().toBool());
         QCOMPARE(settings.snapshot(), expected);
         QVERIFY(!desktop.settingsError().isEmpty());
         QCOMPARE(warnings.count(), 0);
@@ -1228,12 +1332,19 @@ private slots:
     {
         auto *clipboard = QGuiApplication::clipboard();
         clipboard->setText("clipboard sentinel", QClipboard::Clipboard);
-        X11SelectionReader reader;
-        if (QGuiApplication::platformName() == "xcb") {
+        std::unique_ptr<SelectionReader> reader(createSelectionReader());
+        if (QGuiApplication::platformName() == "xcb")
             clipboard->setText("selected text", QClipboard::Selection);
-            QCOMPARE(reader.read().text, QStringLiteral("selected text"));
+        auto *job = reader->read({}, this);
+        QSignalSpy success(job, &SelectionJob::succeeded);
+        QSignalSpy failure(job, &SelectionJob::failed);
+        QVERIFY(success.isEmpty() && failure.isEmpty());
+        if (QGuiApplication::platformName() == "xcb") {
+            QTRY_COMPARE(success.size(), 1);
+            QCOMPARE(qvariant_cast<SelectionResult>(success.first().first()).text, QStringLiteral("selected text"));
         } else {
-            QVERIFY(!reader.read().error.isEmpty());
+            QTRY_COMPARE(failure.size(), 1);
+            QCOMPARE(qvariant_cast<PlatformError>(failure.first().first()).code, PlatformErrorCode::Unsupported);
         }
         QCOMPARE(clipboard->text(QClipboard::Clipboard), QStringLiteral("clipboard sentinel"));
     }
@@ -1267,17 +1378,22 @@ private slots:
         auto registry = ProviderRegistry::builtins();
         AppSettings settings(registry, directory.filePath("settings.ini"));
         TranslationController controller(registry, settings);
-        DesktopBridge desktop(controller, settings);
+        auto platform = createPlatformServices();
+        DesktopBridge desktop(controller, settings, *platform);
         QWindow popup;
         QWindow settingsWindow;
         desktop.setWindows(&popup, &settingsWindow);
         const auto service = QStringLiteral("io.github.trans.Trans");
-        QVERIFY(primary.registerObject("/Trans", &desktop, QDBusConnection::ExportScriptableInvokables));
-        QVERIFY(primary.registerService(service));
-        QVERIFY(!secondary.registerService(service));
+        auto channel = createLinuxInstanceChannel(primary);
+        QCOMPARE(channel->start(AppCommand::ShowSettings).role, InstanceRole::Primary);
+        QVERIFY(!settingsWindow.isVisible());
 
         auto message = QDBusMessage::createMethodCall(service, "/Trans", service, "ShowSettings");
         QDBusPendingCallWatcher showCall(secondary.asyncCall(message));
+        QTest::qWait(30);
+        QVERIFY(!showCall.isFinished());
+        QVERIFY(!settingsWindow.isVisible());
+        channel->setReady([&desktop](AppCommand command) { desktop.dispatchCommand(command); });
         QTRY_VERIFY(showCall.isFinished());
         QVERIFY(!QDBusPendingReply<>(showCall).isError());
         QVERIFY(settingsWindow.isVisible());
@@ -1296,10 +1412,40 @@ private slots:
         QDBusPendingCallWatcher translateCall(secondary.asyncCall(message));
         QTRY_VERIFY(translateCall.isFinished());
         QVERIFY(!QDBusPendingReply<>(translateCall).isError());
+        QTRY_VERIFY(popup.isVisible());
+        QTRY_COMPARE(controller.status(), QStringLiteral("error"));
+        desktop.closeTranslation();
+        QVERIFY(!popup.isVisible());
+
+        message = QDBusMessage::createMethodCall(service, "/Trans", service, "TranslateScreenshot");
+        QDBusPendingCallWatcher captureCall(secondary.asyncCall(message));
+        QTRY_VERIFY(captureCall.isFinished());
+        QVERIFY(!QDBusPendingReply<>(captureCall).isError());
         QVERIFY(popup.isVisible());
         QCOMPARE(controller.status(), QStringLiteral("error"));
         desktop.closeTranslation();
-        QVERIFY(!popup.isVisible());
+
+        message = QDBusMessage::createMethodCall(service, "/Trans", service, "Execute");
+        QDBusPendingCallWatcher unknownCall(secondary.asyncCall(message));
+        QTRY_VERIFY(unknownCall.isFinished());
+        QCOMPARE(QDBusPendingReply<>(unknownCall).error().type(), QDBusError::UnknownMethod);
+
+        auto forwarder = createLinuxInstanceChannel(secondary);
+        QCOMPARE(forwarder->start(AppCommand::ShowSettings).role, InstanceRole::Forwarded);
+        QVERIFY(settingsWindow.isVisible());
+        desktop.closeSettings();
+
+        channel.reset();
+        channel = createLinuxInstanceChannel(primary);
+        QCOMPARE(channel->start(AppCommand::ShowSettings).role, InstanceRole::Primary);
+        message = QDBusMessage::createMethodCall(service, "/Trans", service, "ShowSettings");
+        QDBusPendingCallWatcher failedStartup(secondary.asyncCall(message));
+        QTest::qWait(30);
+        QVERIFY(!failedStartup.isFinished());
+        channel.reset();
+        QTRY_VERIFY(failedStartup.isFinished());
+        QVERIFY(QDBusPendingReply<>(failedStartup).isError());
+        QVERIFY(!settingsWindow.isVisible());
     }
 };
 

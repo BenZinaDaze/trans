@@ -1,9 +1,5 @@
 #include "desktop.h"
-#include "region_capture.h"
-
-#include <KGlobalAccel>
-#include <KWindowSystem>
-#include <KX11Extras>
+#include "platform/instance_channel.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QCursor>
@@ -14,86 +10,6 @@
 #include <QTimer>
 
 namespace Trans {
-
-SelectionResult X11SelectionReader::read() const
-{
-    auto *clipboard = QGuiApplication::clipboard();
-    if (QGuiApplication::platformName() != "xcb" || !clipboard->supportsSelection()) {
-        return {{}, QStringLiteral("当前版本的选区翻译需要 X11 会话。请在登录时选择 Plasma (X11)。")};
-    }
-    return {clipboard->text(QClipboard::Selection), {}};
-}
-
-ShortcutService::ShortcutService(QObject *parent, const QString &actionId, const QString &label, const QString &defaultSequence)
-    : QObject(parent), m_action(this), m_defaultSequence(defaultSequence)
-{
-    m_action.setObjectName(actionId);
-    m_action.setText(label);
-    connect(&m_action, &QAction::triggered, this, &ShortcutService::triggered);
-}
-
-void ShortcutService::initialize(const QString &requested)
-{
-    if (m_initialized) {
-        apply(requested);
-        return;
-    }
-    m_initialized = true;
-    auto *accelerator = KGlobalAccel::self();
-    connect(accelerator, &KGlobalAccel::globalShortcutChanged, this, [this, accelerator](QAction *action, const QKeySequence &) {
-        if (action == &m_action) {
-            const auto keys = accelerator->shortcut(&m_action);
-            m_text = keys.isEmpty() ? QString() : keys.first().toString(QKeySequence::PortableText);
-            emit changed();
-        }
-    });
-    const QList<QKeySequence> defaults{QKeySequence(m_defaultSequence)};
-    accelerator->setDefaultShortcut(&m_action, defaults);
-    accelerator->setShortcut(&m_action, defaults, KGlobalAccel::Autoloading);
-    const auto keys = accelerator->shortcut(&m_action);
-    m_text = keys.isEmpty() ? QString() : keys.first().toString(QKeySequence::PortableText);
-    apply(requested);
-}
-
-bool ShortcutService::apply(const QString &requested)
-{
-    m_error = validateShortcut(requested);
-    if (!m_error.isEmpty()) {
-        emit changed();
-        return false;
-    }
-    const auto key = QKeySequence::fromString(requested, QKeySequence::PortableText);
-    if (m_initialized) {
-        auto *accelerator = KGlobalAccel::self();
-        const auto previous = accelerator->shortcut(&m_action);
-        // KDE's availability query also counts this action's active binding as occupied;
-        // the component argument does not exclude shortcuts we already own.
-        if (!key.isEmpty() && !previous.contains(key)
-            && !KGlobalAccel::isGlobalShortcutAvailable(key, QCoreApplication::applicationName())) {
-            m_error = QStringLiteral("此快捷键已被其他应用占用，请录制另一个组合。");
-            emit changed();
-            return false;
-        }
-        const QList<QKeySequence> desired = key.isEmpty() ? QList<QKeySequence>{} : QList<QKeySequence>{key};
-        if (!accelerator->setShortcut(&m_action, desired, KGlobalAccel::NoAutoloading)
-            || accelerator->shortcut(&m_action) != desired) {
-            accelerator->setShortcut(&m_action, previous, KGlobalAccel::NoAutoloading);
-            m_error = QStringLiteral("KDE 未能应用快捷键，请检查全局快捷键服务后重试。");
-            emit changed();
-            return false;
-        }
-    }
-    m_text = key.toString(QKeySequence::PortableText);
-    emit changed();
-    return true;
-}
-
-QString ShortcutService::text() const
-{
-    return QKeySequence::fromString(m_text, QKeySequence::PortableText).toString(QKeySequence::NativeText);
-}
-
-QString ShortcutService::sequence() const { return m_text; }
 
 QRect PopupPresenter::centeredGeometry(const QRect &available, QSize requested)
 {
@@ -106,11 +22,12 @@ QRect PopupPresenter::centeredGeometry(const QRect &available, QSize requested)
 
 void PopupPresenter::rememberSource(QWindow *popup, QWindow *settings)
 {
-    if (QGuiApplication::platformName() != "xcb")
-        return;
-    const auto active = KX11Extras::activeWindow();
-    if (active && (!popup || active != popup->winId()) && (!settings || active != settings->winId()))
-        m_sourceWindow = active;
+    setSource(m_windows.captureSource(popup, settings));
+}
+
+void PopupPresenter::setSource(SourceContextPtr source)
+{
+    if (source) m_source = std::move(source);
 }
 
 QRect PopupPresenter::cursorGeometry(const QRect &available, QSize requested, QPoint cursor)
@@ -149,10 +66,7 @@ void PopupPresenter::show(QWindow *window, QSize requested, const QString &posit
     }
     window->show();
     window->raise();
-    if (QGuiApplication::platformName() == "xcb")
-        KWindowSystem::activateWindow(window);
-    else
-        window->requestActivate();
+    m_windows.activate(window);
 }
 
 void PopupPresenter::close(QWindow *window, QWindow *other, bool restoreFocus)
@@ -164,32 +78,46 @@ void PopupPresenter::close(QWindow *window, QWindow *other, bool restoreFocus)
     if (!wasActive || !restoreFocus)
         return;
     if (other && other->isVisible()) {
-        other->requestActivate();
-    } else if (QGuiApplication::platformName() == "xcb" && m_sourceWindow
-               && KX11Extras::hasWId(m_sourceWindow)) {
-        KX11Extras::activateWindow(m_sourceWindow);
+        m_windows.activate(other);
+    } else {
+        m_windows.restoreSource(m_source);
     }
 }
 
-DesktopBridge::DesktopBridge(TranslationController &controller, AppSettings &settings, QObject *parent, ShortcutService *shortcut, ShortcutService *screenshotShortcut)
-    : QObject(parent), m_controller(controller), m_settings(settings),
-      m_ownedShortcut(shortcut ? nullptr : std::make_unique<ShortcutService>()),
-      m_shortcut(shortcut ? shortcut : m_ownedShortcut.get()),
-      m_ownedScreenshotShortcut(screenshotShortcut ? nullptr : std::make_unique<ShortcutService>(nullptr,
-          QStringLiteral("translate-screenshot"), QStringLiteral("截图翻译"), QStringLiteral("Meta+Shift+O"))),
-      m_screenshotShortcut(screenshotShortcut ? screenshotShortcut : m_ownedScreenshotShortcut.get())
+DesktopBridge::DesktopBridge(TranslationController &controller, AppSettings &settings, PlatformServices &platform, QObject *parent)
+    : QObject(parent), m_controller(controller), m_settings(settings), m_platform(platform), m_presenter(platform.windows())
 {
-    connect(m_shortcut, &ShortcutService::triggered, this, &DesktopBridge::TranslateSelection);
-    connect(m_shortcut, &ShortcutService::changed, this, &DesktopBridge::shortcutChanged);
-    connect(m_screenshotShortcut, &ShortcutService::triggered, this, &DesktopBridge::TranslateScreenshot);
-    connect(m_screenshotShortcut, &ShortcutService::changed, this, &DesktopBridge::shortcutChanged);
-    connect(&m_controller, &TranslationController::captureFinished, this, [this](bool cancelled) {
+    connect(&platform.shortcuts(), &ShortcutService::triggered, this, [this](ShortcutAction action) {
+        if (action == ShortcutAction::Selection) TranslateSelection();
+        else TranslateScreenshot();
+    });
+    connect(&platform.shortcuts(), &ShortcutService::changed, this, &DesktopBridge::shortcutChanged);
+    connect(&platform.shortcuts(), &ShortcutService::capabilityChanged, this, &DesktopBridge::capabilitiesChanged);
+    connect(&platform.shortcuts(), &ShortcutService::capabilityChanged, this, &DesktopBridge::shortcutChanged);
+    connect(&platform.selection(), &SelectionReader::capabilityChanged, this, &DesktopBridge::capabilitiesChanged);
+    connect(&platform.screenshots(), &ScreenshotService::capabilityChanged, this, &DesktopBridge::capabilitiesChanged);
+    connect(&platform.windows(), &WindowIntegration::capabilityChanged, this, &DesktopBridge::capabilitiesChanged);
+    connect(&m_controller, &TranslationController::selectionFinished, this, [this](const SourceContextPtr &source, bool cancelled) {
         restoreCaptureWindows();
+        if (cancelled) return;
+        m_presenter.setSource(source);
+        showTranslationWindow();
+    });
+    connect(&m_controller, &TranslationController::captureFinished, this, [this](bool cancelled) {
+        if (!m_startingSelection) restoreCaptureWindows();
         if (!cancelled) showTranslationWindow();
     });
 }
 
-DesktopBridge::~DesktopBridge() = default;
+DesktopBridge::~DesktopBridge()
+{
+    disconnect(&m_controller, nullptr, this, nullptr);
+    m_controller.cancel();
+    if (m_shortcutJob) {
+        disconnect(m_shortcutJob, nullptr, this, nullptr);
+        m_shortcutJob->cancel();
+    }
+}
 
 void DesktopBridge::setWindows(QWindow *popup, QWindow *settings)
 {
@@ -254,9 +182,8 @@ void DesktopBridge::resizeTranslation(QSize preferred)
 bool DesktopBridge::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_popup && m_popup && m_popup->isVisible() && event->type() == QEvent::Expose) {
-        // After mapping, KWin knows the frame margins and accepts native state changes reliably.
-        if (QGuiApplication::platformName() == "xcb")
-            KX11Extras::setState(m_popup->winId(), NET::SkipTaskbar | NET::SkipPager);
+        // Native mapping hints are applied after the window manager knows the frame.
+        m_platform.windows().popupMapped(m_popup);
         if (popupAvailableSize() != m_reportedPopupAvailableSize) {
             m_reportedPopupAvailableSize = popupAvailableSize();
             emit popupAvailableSizeChanged();
@@ -280,13 +207,27 @@ bool DesktopBridge::eventFilter(QObject *watched, QEvent *event)
 
 void DesktopBridge::initialize()
 {
-    m_shortcut->initialize(m_settings.shortcut());
-    m_screenshotShortcut->initialize(m_settings.snapshot().value("screenshotShortcut").toString());
+    if (m_initialized) return;
+    m_initialized = true;
+    m_settingsQueue.enqueue({m_settings.snapshot(), false});
+    if (!m_settingsBusy) {
+        m_settingsBusy = true;
+        emit settingsBusyChanged();
+        QTimer::singleShot(0, this, &DesktopBridge::startSettingsRequest);
+    }
     m_menu = std::make_unique<QMenu>();
     auto *openAction = m_menu->addAction(QStringLiteral("打开翻译窗口"), this, &DesktopBridge::ShowTranslation);
     m_menu->setDefaultAction(openAction);
-    m_menu->addAction(QStringLiteral("选区翻译"), this, &DesktopBridge::TranslateSelection);
-    m_menu->addAction(QStringLiteral("截图翻译"), this, &DesktopBridge::TranslateScreenshot);
+    auto *selectionAction = m_menu->addAction(QStringLiteral("选区翻译"), this, &DesktopBridge::TranslateSelection);
+    auto *screenshotAction = m_menu->addAction(QStringLiteral("截图翻译"), this, &DesktopBridge::TranslateScreenshot);
+    auto updateActions = [this, selectionAction, screenshotAction] {
+        selectionAction->setEnabled(m_platform.selection().availability() == CapabilityState::Available);
+        selectionAction->setToolTip(m_platform.selection().unavailableReason());
+        screenshotAction->setEnabled(m_platform.screenshots().availability() == CapabilityState::Available);
+        screenshotAction->setToolTip(m_platform.screenshots().unavailableReason());
+    };
+    connect(this, &DesktopBridge::capabilitiesChanged, m_menu.get(), updateActions);
+    updateActions();
     m_menu->addAction(QStringLiteral("设置…"), this, &DesktopBridge::ShowSettings);
     m_menu->addSeparator();
     m_menu->addAction(QStringLiteral("退出 Trans"), qApp, &QCoreApplication::quit);
@@ -311,15 +252,12 @@ void DesktopBridge::showTranslationWindow()
     m_presenter.show(m_popup, m_preferredPopupSize, m_settings.popupPosition());
     emit popupAvailableSizeChanged();
     resizeTranslation(m_preferredPopupSize);
-    // Keep the tray-style popup out of task/pager lists without Qt::Tool's group-transient
-    // relationship, which can put it above its own settings dialog on KDE.
-    if (m_popup && QGuiApplication::platformName() == "xcb")
-        KX11Extras::setState(m_popup->winId(), NET::SkipTaskbar | NET::SkipPager);
+    m_platform.windows().popupMapped(m_popup);
 }
 
 void DesktopBridge::ShowTranslation()
 {
-    if (m_controller.status() == "capturing") return;
+    if (m_controller.status() == "capturing" || m_controller.status() == "selecting") return;
     // Reopening is a view operation: keep the current result (or request state),
     // without reading PRIMARY or issuing another paid translation request.
     m_presenter.rememberSource(m_popup, m_settingsWindow);
@@ -329,14 +267,12 @@ void DesktopBridge::ShowTranslation()
 void DesktopBridge::TranslateSelection()
 {
     if (!m_captureHidden) m_presenter.rememberSource(m_popup, m_settingsWindow);
-    // Read PRIMARY before showing a window or changing keyboard focus.
-    const auto selection = m_selection.read();
-    restoreCaptureWindows();
-    if (selection.error.isEmpty())
-        m_controller.translateText(selection.text);
-    else
-        m_controller.selectionError(selection.error);
-    showTranslationWindow();
+    // Cancel old capture/OCR/translation before starting the selection job, but
+    // never show or activate a window until the asynchronous read has finished.
+    m_startingSelection = true;
+    m_controller.cancel();
+    m_startingSelection = false;
+    m_controller.translateSelection(m_platform.selection().read(m_presenter.source(), &m_controller));
 }
 
 void DesktopBridge::restoreCaptureWindows()
@@ -350,6 +286,13 @@ void DesktopBridge::restoreCaptureWindows()
 
 void DesktopBridge::TranslateScreenshot()
 {
+    m_controller.cancel();
+    if (m_platform.screenshots().availability() != CapabilityState::Available) {
+        restoreCaptureWindows();
+        m_controller.selectionError(m_platform.screenshots().unavailableReason());
+        showTranslationWindow();
+        return;
+    }
     const auto config = m_settings.snapshot();
     if (config.value("ocrApiKey").toString().trimmed().isEmpty() || config.value("ocrSecretKey").toString().trimmed().isEmpty()) {
         restoreCaptureWindows();
@@ -366,12 +309,13 @@ void DesktopBridge::TranslateScreenshot()
     }
     if (m_popup) m_popup->hide();
     if (m_settingsWindow) m_settingsWindow->hide();
-    m_controller.translateScreenshot(createScreenshotJob(&m_controller));
+    m_controller.translateScreenshot(m_platform.screenshots().captureRegion(&m_controller));
 }
 
 void DesktopBridge::ShowSettings()
 {
-    if (m_controller.status() == "capturing") m_controller.cancel();
+    if (m_controller.status() == "capturing" || m_controller.status() == "selecting") m_controller.cancel();
+    restoreCaptureWindows();
     m_presenter.rememberSource(m_popup, m_settingsWindow);
     if (m_settingsWindow)
         m_presenter.show(m_settingsWindow, m_settingsWindow->size());
@@ -380,10 +324,16 @@ void DesktopBridge::ShowSettings()
 void DesktopBridge::closeTranslation()
 {
     m_controller.cancel();
+    restoreCaptureWindows();
     m_presenter.close(m_popup, m_settingsWindow, m_settings.restoreFocus());
 }
 
-void DesktopBridge::closeSettings() { m_presenter.close(m_settingsWindow, m_popup, m_settings.restoreFocus()); }
+void DesktopBridge::closeSettings()
+{
+    if (m_controller.status() == "selecting") m_controller.cancel();
+    restoreCaptureWindows();
+    m_presenter.close(m_settingsWindow, m_popup, m_settings.restoreFocus());
+}
 
 void DesktopBridge::copyTranslation()
 {
@@ -391,45 +341,165 @@ void DesktopBridge::copyTranslation()
         QGuiApplication::clipboard()->setText(m_controller.translatedText(), QClipboard::Clipboard);
 }
 
-bool DesktopBridge::saveSettings(const QVariantMap &values)
+
+QString DesktopBridge::shortcutError() const
 {
-    m_settingsError = m_settings.validate(values);
-    if (!m_settingsError.isEmpty()) {
-        emit settingsErrorChanged();
-        return false;
-    }
-    const QString previous = m_shortcut->sequence();
-    const QString previousScreenshot = m_screenshotShortcut->sequence();
-    const QString desired = values.value("shortcut").toString();
-    const QString desiredScreenshot = values.value("screenshotShortcut").toString();
-    const bool changed = desired != previous;
-    const bool screenshotChanged = desiredScreenshot != previousScreenshot;
-    auto rollback = [&] {
-        // Release both actions before restoring, allowing the user to swap bindings.
-        if (changed) m_shortcut->apply({});
-        if (screenshotChanged) m_screenshotShortcut->apply({});
-        if (changed) m_shortcut->apply(previous);
-        if (screenshotChanged) m_screenshotShortcut->apply(previousScreenshot);
+    return m_shortcutError.isEmpty() ? m_platform.shortcuts().unavailableReason() : m_shortcutError;
+}
+
+QVariantMap DesktopBridge::capabilities() const
+{
+    auto capability = [](CapabilityState state, const QString &reason) {
+        QString name;
+        switch (state) {
+        case CapabilityState::Available: name = QStringLiteral("available"); break;
+        case CapabilityState::Unavailable: name = QStringLiteral("unavailable"); break;
+        case CapabilityState::Unsupported: name = QStringLiteral("unsupported"); break;
+        case CapabilityState::PermissionDenied: name = QStringLiteral("permissionDenied"); break;
+        }
+        return QVariantMap{{"state", name}, {"available", state == CapabilityState::Available}, {"reason", reason}};
     };
-    bool applied = true;
-    if (changed) applied = m_shortcut->apply({});
-    if (applied && screenshotChanged) applied = m_screenshotShortcut->apply({});
-    if (applied && changed) applied = m_shortcut->apply(desired);
-    if (applied && screenshotChanged) applied = m_screenshotShortcut->apply(desiredScreenshot);
-    if (!applied) {
-        m_settingsError = shortcutError().isEmpty() ? QStringLiteral("快捷键应用失败，设置未保存。") : shortcutError();
-        rollback();
-        emit settingsErrorChanged();
-        return false;
+    return {{"selection", capability(m_platform.selection().availability(), m_platform.selection().unavailableReason())},
+            {"screenshots", capability(m_platform.screenshots().availability(), m_platform.screenshots().unavailableReason())},
+            {"shortcuts", capability(m_platform.shortcuts().availability(), m_platform.shortcuts().unavailableReason())},
+            {"focusRestoration", capability(m_platform.windows().focusRestoration(), m_platform.windows().focusRestorationReason())}};
+}
+
+void DesktopBridge::dispatchCommand(AppCommand command)
+{
+    switch (command) {
+    case AppCommand::ShowTranslation: ShowTranslation(); break;
+    case AppCommand::TranslateSelection: TranslateSelection(); break;
+    case AppCommand::TranslateScreenshot: TranslateScreenshot(); break;
+    case AppCommand::ShowSettings: ShowSettings(); break;
     }
-    if (!m_settings.save(values)) {
-        rollback();
-        m_settingsError = m_settings.lastError();
-        emit settingsErrorChanged();
-        return false;
+}
+
+void DesktopBridge::saveSettings(const QVariantMap &values)
+{
+    // Copy each submitted draft. A second caller cannot interleave registration
+    // or persistence with an in-flight transaction, including its rollback.
+    m_settingsQueue.enqueue({values, true});
+    if (m_settingsBusy) return;
+    m_settingsBusy = true;
+    emit settingsBusyChanged();
+    QTimer::singleShot(0, this, &DesktopBridge::startSettingsRequest);
+}
+
+void DesktopBridge::startSettingsRequest()
+{
+    m_settingsRequest = m_settingsQueue.dequeue();
+    m_settingsError.clear();
+    m_rollbackErrors.clear();
+    m_rollingBack = false;
+    m_shortcutUpdates.clear();
+    m_shortcutUpdateIndex = 0;
+    if (m_settingsRequest.persist) {
+        m_settingsError = m_settings.validate(m_settingsRequest.values);
+        if (!m_settingsError.isEmpty()) {
+            finishSettingsRequest(false);
+            return;
+        }
     }
+    auto &shortcuts = m_platform.shortcuts();
+    const auto currentSettings = m_settings.snapshot();
+    const std::array<ShortcutAction, 2> actions{ShortcutAction::Selection, ShortcutAction::Screenshot};
+    const std::array<QString, 2> keys{QStringLiteral("shortcut"), QStringLiteral("screenshotShortcut")};
+    std::array<QString, 2> desired;
+    for (size_t i = 0; i < actions.size(); ++i) {
+        m_previousShortcuts[i] = shortcuts.sequence(actions[i]);
+        desired[i] = QKeySequence::fromString(m_settingsRequest.values.value(keys[i]).toString(), QKeySequence::PortableText)
+                         .toString(QKeySequence::PortableText);
+        m_changedShortcuts[i] = !m_settingsRequest.persist || desired[i] != m_previousShortcuts[i];
+        // An unavailable capability must not prevent saving unrelated options.
+        // Preserve the configured binding, without pretending it is registered.
+        if (m_settingsRequest.persist && shortcuts.availability() != CapabilityState::Available
+            && m_settingsRequest.values.value(keys[i]) == currentSettings.value(keys[i]))
+            m_changedShortcuts[i] = false;
+    }
+    // Release both affected bindings before applying either, allowing a swap.
+    for (size_t i = 0; i < actions.size(); ++i)
+        if (m_changedShortcuts[i]) m_shortcutUpdates.append({actions[i], {}});
+    for (size_t i = 0; i < actions.size(); ++i)
+        if (m_changedShortcuts[i]) m_shortcutUpdates.append({actions[i], desired[i]});
+    runShortcutUpdate();
+}
+
+void DesktopBridge::runShortcutUpdate()
+{
+    if (m_shortcutUpdateIndex == m_shortcutUpdates.size()) {
+        if (m_rollingBack) {
+            const auto selection = m_platform.shortcuts().sequence(ShortcutAction::Selection);
+            const auto screenshot = m_platform.shortcuts().sequence(ShortcutAction::Screenshot);
+            if (selection != m_previousShortcuts[0] || screenshot != m_previousShortcuts[1])
+                m_rollbackErrors.append(QStringLiteral("实际快捷键未恢复到原值"));
+            if (!m_rollbackErrors.isEmpty()) {
+                m_settingsError += QStringLiteral("\n快捷键恢复失败：%1。当前选区快捷键：%2；截图快捷键：%3。设置文件未更改，请重试保存。")
+                    .arg(m_rollbackErrors.join(QStringLiteral("；")),
+                         selection.isEmpty() ? QStringLiteral("未绑定") : selection,
+                         screenshot.isEmpty() ? QStringLiteral("未绑定") : screenshot);
+                m_shortcutError = m_settingsError;
+            }
+            finishSettingsRequest(false);
+        } else if (m_settingsRequest.persist && !m_settings.save(m_settingsRequest.values)) {
+            rollbackSettings(m_settings.lastError());
+        } else {
+            if (!m_shortcutUpdates.isEmpty()) m_shortcutError.clear();
+            finishSettingsRequest(true);
+        }
+        return;
+    }
+    const auto update = m_shortcutUpdates[m_shortcutUpdateIndex++];
+    m_shortcutJob = m_platform.shortcuts().update(update.action, update.sequence, this);
+    connect(m_shortcutJob, &ShortcutJob::succeeded, this, [this] {
+        m_shortcutJob.clear();
+        runShortcutUpdate();
+    });
+    connect(m_shortcutJob, &ShortcutJob::failed, this, [this](const PlatformError &error) {
+        m_shortcutJob.clear();
+        const auto message = error.message.isEmpty() ? QStringLiteral("快捷键更新失败。") : error.message;
+        if (m_rollingBack) {
+            m_rollbackErrors.append(message);
+            runShortcutUpdate();
+        } else {
+            m_shortcutError = message;
+            rollbackSettings(message);
+        }
+    });
+}
+
+void DesktopBridge::rollbackSettings(const QString &error)
+{
+    m_settingsError = error;
+    m_rollingBack = true;
+    m_shortcutUpdates.clear();
+    m_shortcutUpdateIndex = 0;
+    const std::array<ShortcutAction, 2> actions{ShortcutAction::Selection, ShortcutAction::Screenshot};
+    for (size_t i = 0; i < actions.size(); ++i)
+        if (m_changedShortcuts[i]) m_shortcutUpdates.append({actions[i], {}});
+    for (size_t i = 0; i < actions.size(); ++i)
+        if (m_changedShortcuts[i]) m_shortcutUpdates.append({actions[i], m_previousShortcuts[i]});
+    runShortcutUpdate();
+}
+
+void DesktopBridge::finishSettingsRequest(bool success)
+{
+    const bool persisted = m_settingsRequest.persist;
+    // Do not retain credentials from submitted drafts after completion.
+    m_settingsRequest.values.clear();
     emit settingsErrorChanged();
-    return true;
+    emit shortcutChanged();
+    if (m_settingsQueue.isEmpty()) {
+        m_settingsBusy = false;
+        emit settingsBusyChanged();
+    } else {
+        QTimer::singleShot(0, this, &DesktopBridge::startSettingsRequest);
+    }
+    if (persisted) emit settingsSaveFinished(success);
+    else if (!success) {
+        if (m_tray) m_tray->showMessage(QStringLiteral("Trans"), shortcutError(), QSystemTrayIcon::Warning);
+        if (!m_controller.busy()) ShowSettings();
+    }
 }
 
 QString DesktopBridge::shortcutForKey(int key, int modifiers) const

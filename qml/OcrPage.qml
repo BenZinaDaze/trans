@@ -1,9 +1,11 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Trans.Core
 
 UiScrollView {
     id: root
+    required property DesktopBridge desktop
     contentWidth: availableWidth
     clip: true
     function load(values) {
@@ -22,6 +24,14 @@ UiScrollView {
     ColumnLayout {
         width: root.availableWidth
         spacing: 16
+        Label {
+            text: root.desktop.capabilities.screenshots.reason
+            visible: text.length > 0
+            color: ui.muted
+            font.pixelSize: 12
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+        }
         UiSection {
             Layout.fillWidth: true
             title: "百度高精度文字识别"
@@ -44,7 +54,7 @@ UiScrollView {
             description: "按住鼠标左键拖出矩形，松开后识别框内文字；Esc 或右键取消。"
             Label {
                 Layout.fillWidth: true
-                text: "只有框选区域将发送给百度，识别文字再发送给当前翻译服务。X11 截图仅在内存中处理，不保存截图历史。密钥以明文保存在本机受限权限配置文件中。请求超时沿用翻译偏好设置。"
+                text: "只有框选区域将发送给百度，识别文字再发送给当前翻译服务。应用不保存截图历史。密钥以明文保存在本机受限权限配置文件中。请求超时沿用翻译偏好设置。"
                 color: ui.muted
                 font.pixelSize: 12
                 wrapMode: Text.Wrap

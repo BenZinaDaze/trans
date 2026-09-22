@@ -21,17 +21,30 @@ conda run -n myself --no-capture-output ./build/trans --settings
 ## 架构与参考
 
 ```text
-KGlobalAccel → X11 SelectionReader → TranslationController → OpenAI / DeepSeek
-                                           ↓
-                                     QML 翻译弹窗
+平台 ShortcutService → 异步 SelectionReader → TranslationController → OpenAI / DeepSeek
+                                                   ↓
+                                             QML 翻译弹窗
 
-QML 配置中心 → AppSettings + DesktopBridge（保存及快捷键）
+QML 配置中心 → AppSettings + DesktopBridge（异步保存及平台能力编排）
              → ProviderTools（获取模型、试译）
+main → InstanceChannel（单实例/命令转发）+ PlatformServices（平台服务所有权）
 ```
 
 `TranslationProvider` / `TranslationJob` 封装异步接口，统一结果和错误。`ProviderRegistry` 仅注册两家提供商。`AppSettings` 提供完整配置快照、校验与持久化；页面修改的是草稿，保存成功后统一生效。`ProviderTools` 使用独立的可取消请求，不改变当前选区翻译。
 
 参考 [Read Frog](https://github.com/mengxi-ream/read-frog) 的独立提供商、基础地址、模型、温度、推理级别、自定义请求头与参数配置方式，未引入其浏览器扩展或 AI SDK 依赖。参考版本：`0cd93f25d98018e1a502df4819ce8d22c5aa1254`，主要查阅 `src/utils/constants/providers.ts`、`src/types/config/provider/schemas.ts` 和 `src/utils/providers/model.ts`。协议实现依据 [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create)、[OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) 和 [DeepSeek Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion) 文档。
+
+### 平台能力边界
+
+`src/platform/` 定义 `SelectionReader`、`ShortcutService`、`ScreenshotService`、`WindowIntegration`、`InstanceChannel`；Linux 实现在 `src/platform/linux/`。`main` 创建并注入 `PlatformServices`，QML 与控制器不包含 KDE、X11、D-Bus 类型。浮窗几何、托盘、普通剪贴板写入、翻译与 OCR 保持共享。
+
+构建目标分为 `trans_platform`（公共接口和可复用框选组件）、`trans_platform_linux`（原生后端）、`trans_core`（业务/QML 门面）。Qt DBus 和 KF6 只由 Linux 后端使用；Linux 桌面文件与 X11 测试按平台启用。当前仍只正式支持 Arch Linux x86_64 / Plasma 6 X11，其他系统配置构建会明确拒绝：平台接口并不代表 Windows 后端已经实现。后续移植需增加真实后端、工厂、构建与发布规则，不添加成功空实现。
+
+选区读取返回 `SelectionJob`，在呈现窗口前异步完成；`SourceContextPtr` 保存不透明来源信息。`selecting`、截图、OCR、翻译使用同一请求代次隔离迟到回调。任务由 QObject owner 管理，正常完成后延迟删除，取消应幂等且不得重复通知。平台错误使用 `PlatformError`，区分不支持、服务不可用、权限拒绝、无选区、冲突、超时与取消。
+
+快捷键通过 `ShortcutService::update(action, sequence, owner)` 异步更新，两个动作共享一个服务。`DesktopBridge::saveSettings` 不再返回同步成功值；`settingsBusy` 与 `settingsSaveFinished(bool)` 通知界面。保存请求串行处理，交换绑定前先释放两项，注册或持久化失败后尝试补偿；补偿失败明确显示错误和实际生效绑定，不能声称系统注册与配置文件构成原子事务。
+
+`capabilities` 向界面提供选区、截图、快捷键、焦点恢复的状态及原因，不以 OS 名称判断功能。窗口激活仅是请求，不保证系统接受。`InstanceChannel` 保留服务 `io.github.trans.Trans`、路径 `/Trans` 和四个固定方法；就绪前的调用等待处理，启动失败或超时返回错误，未知方法不执行。冒烟模式不注册实例与快捷键。
 
 ## 配置与协议细节
 
@@ -83,15 +96,15 @@ OpenAI Responses 请求设置 `store: false`，从完成的 assistant 消息中�
 
 ### 截图 OCR
 
-`ScreenshotJob` 隔离截图后端，`createScreenshotJob` 根据平台选择实现。X11 使用 `X11RegionScreenshotJob`：先捕获所有屏幕，再为每块屏幕显示冻结画面的 `RegionOverlay`，用户左键拖动并松开后只返回框选的 `QImage`。坐标按逻辑窗口尺寸与实际图片尺寸映射，支持不同缩放比例、反向拖动和负坐标屏幕；拖动限制在起始屏幕内。单击或小于 15 像素的选区不会提交。Esc、右键、超时、屏幕布局变化和请求替换均关闭遮罩，释放键盘抓取。截图全程在内存中处理。
+`ScreenshotService::captureRegion` 创建平台无关的 `ScreenshotJob`。Linux 工厂明确区分 xcb 与 wayland/wayland-egl，不把其他显示插件误当 Portal。X11 使用 `X11RegionScreenshotJob`：先捕获所有屏幕，再为每块屏幕显示冻结画面的 `RegionOverlay`，用户左键拖动并松开后只返回框选的 `QImage`。坐标按逻辑窗口尺寸与实际图片尺寸映射，支持不同缩放比例、反向拖动和负坐标屏幕；拖动限制在起始屏幕内。单击或小于 15 像素的选区不会提交。Esc、右键、超时、屏幕布局变化和请求替换均关闭遮罩，释放键盘抓取。截图全程在内存中处理。
 
 保留 `PortalScreenshotJob` 供后续 Wayland 适配，通过 Qt DBus 调用 `org.freedesktop.portal.Screenshot`；必须是版本 3 且 `AvailableTargets` 包含区域目标才发送 `target=4`。旧版 `interactive=true` 并不保证有区域选项，因此不再回退为全屏截图，而是明确提示区域截图不可用。调用前订阅预期请求路径的 `Response`，返回不同路径时调整订阅；取消时调用 `Request.Close`。两种截图交互最长等待 180 秒。
 
 `BaiduOcrProvider` / `OcrJob` 单独实现百度 `accurate_basic`：PNG → Base64 → 百分号转义表单，`language_type=auto_detect`。按 docs/OCR.pdf 该接口章节限制像素和编码后体积（15–8192 像素、10 MB），不套用文档概述中其他接口的限制。采用固定百度 HTTPS 地址，保留 TLS 验证，禁止自动重定向；测试可注入本地地址。API Key 和 Secret Key 获取的 token 仅内存缓存，预留 60 秒过期裕量；错误 110/111 最多刷新一次，刷新也计入本次 OCR 超时。响应最多 2 MiB。
 
-控制器状态增加 `capturing`、`recognizing`，共用请求编号隔离旧截图、OCR 和翻译响应。识别文字逐行保留，交给现有翻译方法和输入上限检查；重新翻译不重新识别。截图时隐藏两个窗口但保留设置草稿；截图取消恢复先前内容，识别失败提示重新截图。关闭结果窗取消当前请求。
+控制器状态包含 `selecting`、`capturing`、`recognizing`，共用请求编号隔离旧选区、截图、OCR 和翻译响应。识别文字逐行保留，交给现有翻译方法和输入上限检查；重新翻译不重新识别。截图时隐藏两个窗口但保留设置草稿；截图取消恢复先前内容，识别失败提示重新截图。关闭结果窗取消当前请求。
 
-新增动作 `translate-screenshot`，默认 Meta+Shift+O；`TranslateScreenshot` 同时通过 QML、托盘和单实例 D-Bus 暴露。快捷键保存先释放变更绑定，以支持交换两个快捷键；应用绑定或持久化失败时恢复原绑定。OCR 密钥使用原有配置文件权限与原子保存机制。Portal 返回本地 URI 后读取为 `QImage`，不保存历史、不删除归属不明的 Portal 文件。
+动作 `translate-screenshot` 默认 Meta+Shift+O；`TranslateScreenshot` 同时通过 QML、托盘和单实例 D-Bus 暴露。快捷键保存先释放变更绑定，以支持交换两个快捷键；应用绑定或持久化失败时尝试恢复原绑定，恢复失败显示实际状态。OCR 密钥使用原有配置文件权限与原子保存机制。Portal 返回本地 URI 后读取为 `QImage`，不保存历史、不删除归属不明的 Portal 文件。
 
 `trans_ocr_tests` 使用本地 HTTP 服务与私有 D-Bus，覆盖鉴权缓存和刷新、请求编码、图片限制、空结果/额度/超时/取消、Portal 能力与响应、任务替换和快捷键回滚，不访问真实百度服务。配置页测试覆盖 OCR 草稿、保存和截图取消恢复。区域裁剪测试验证像素内容、反向拖动、缩放映射和误点击；可选 X11 测试使用真实鼠标拖动验证返回的图片尺寸及 Esc 取消。
 

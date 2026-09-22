@@ -37,8 +37,11 @@ UiScrollView {
         UiSection {
             Layout.fillWidth: true
             title: "选区翻译快捷键"
-            description: "选中一个词或一句话，随时呼出翻译窗口。"
+            description: root.desktop.capabilities.selection.available
+                ? "选中一个词或一句话，随时呼出翻译窗口。"
+                : root.desktop.capabilities.selection.reason
             RowLayout {
+                enabled: root.desktop.capabilities.shortcuts.available
                 Layout.fillWidth: true
                 spacing: 8
                 UiField {
@@ -77,14 +80,17 @@ UiScrollView {
                 UiButton { text: "清空"; quiet: true; onClicked: { root.shortcut = ""; root.recording = false } }
             }
             Label { text: "组合键需包含 Ctrl、Alt 或 Meta。按 Esc 取消录制。"; font.pixelSize: 11; color: ui.muted; Layout.fillWidth: true; wrapMode: Text.Wrap }
-            UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; onClicked: root.shortcut = "Meta+Shift+T" }
+            UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; enabled: root.desktop.capabilities.shortcuts.available; onClicked: root.shortcut = "Meta+Shift+T" }
             Label { text: root.desktop.shortcutError; color: ui.danger; font.pixelSize: 12; visible: text.length > 0; Layout.fillWidth: true; wrapMode: Text.Wrap }
         }
         UiSection {
             Layout.fillWidth: true
             title: "截图翻译快捷键"
-            description: "鼠标拖动框选文字，松开后自动识别并翻译。"
+            description: root.desktop.capabilities.screenshots.available
+                ? "鼠标拖动框选文字，松开后自动识别并翻译。"
+                : root.desktop.capabilities.screenshots.reason
             RowLayout {
+                enabled: root.desktop.capabilities.shortcuts.available
                 Layout.fillWidth: true
                 spacing: 8
                 UiField {
@@ -120,7 +126,7 @@ UiScrollView {
                 }
                 UiButton { text: "清空"; quiet: true; onClicked: { root.screenshotShortcut = ""; root.recordingScreenshot = false } }
             }
-            UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; onClicked: root.screenshotShortcut = "Meta+Shift+O" }
+            UiButton { text: "恢复默认快捷键"; symbol: "refresh"; quiet: true; enabled: root.desktop.capabilities.shortcuts.available; onClicked: root.screenshotShortcut = "Meta+Shift+O" }
         }
         UiSection {
             Layout.fillWidth: true
@@ -139,7 +145,8 @@ UiScrollView {
             title: "窗口行为"
             UiCheck { id: stayOnTop; objectName: "stayOnTopField"; text: "翻译窗口保持置顶"; Layout.fillWidth: true }
             Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: ui.line }
-            UiCheck { id: restoreFocus; objectName: "restoreFocusField"; text: "关闭后恢复原应用焦点"; Layout.fillWidth: true }
+            UiCheck { id: restoreFocus; objectName: "restoreFocusField"; text: "关闭后恢复原应用焦点"; enabled: root.desktop.capabilities.focusRestoration.available; Layout.fillWidth: true }
+            Label { text: root.desktop.capabilities.focusRestoration.reason; visible: text.length > 0; color: ui.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
         }
     }
 }
