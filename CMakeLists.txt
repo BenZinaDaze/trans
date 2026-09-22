@@ -230,8 +230,8 @@ if(BUILD_TESTING)
     target_link_libraries(trans_tests PRIVATE Qt6::DBus)
     target_link_libraries(trans_ocr_tests PRIVATE Qt6::DBus)
   endif()
-  add_test(NAME trans_ocr COMMAND trans_ocr_tests)
-  add_test(NAME trans_core COMMAND trans_tests)
+  add_test(NAME trans_ocr COMMAND trans_ocr_tests -o -,txt -o trans_ocr-test.txt,txt)
+  add_test(NAME trans_core COMMAND trans_tests -o -,txt -o trans_core-test.txt,txt)
   add_test(NAME trans_qml_smoke COMMAND trans --smoke-test)
   set_tests_properties(
     trans_core trans_ocr trans_qml_smoke
@@ -246,8 +246,10 @@ if(BUILD_TESTING)
                       tests/test_windows_storage.cpp)
     target_link_libraries(trans_windows_storage_tests
                           PRIVATE trans_platform_windows Qt6::Test advapi32)
-    add_test(NAME trans_windows_instance COMMAND trans_windows_instance_tests)
-    add_test(NAME trans_windows_storage COMMAND trans_windows_storage_tests)
+    add_test(NAME trans_windows_instance COMMAND trans_windows_instance_tests
+             -o -,txt -o trans_windows_instance-test.txt,txt)
+    add_test(NAME trans_windows_storage COMMAND trans_windows_storage_tests
+             -o -,txt -o trans_windows_storage-test.txt,txt)
     set_tests_properties(trans_windows_instance trans_windows_storage
                          PROPERTIES TIMEOUT 120)
   endif()
