@@ -7,6 +7,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+// The Windows SDK UIA headers require COM declarations even with lean Windows headers.
+#include <ole2.h>
 #include <uiautomation.h>
 #include <wrl/client.h>
 
