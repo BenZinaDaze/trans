@@ -25,7 +25,7 @@ conda run -n myself --no-capture-output ./build/trans --settings
 ```powershell
 $qt = 'C:/Qt/6.8.3/msvc2022_64'
 $env:PATH = "$qt/bin;$env:PATH"
-cmake -S . -B build-windows -G 'Visual Studio 17 2022' -A x64 "-DCMAKE_PREFIX_PATH=$qt" -DCMAKE_INSTALL_BINDIR=. -DBUILD_TESTING=ON
+cmake -S . -B build-windows -G 'Visual Studio 17 2022' -A x64 "-DCMAKE_PREFIX_PATH=$qt" "-DCMAKE_INSTALL_BINDIR=." -DBUILD_TESTING=ON
 cmake --build build-windows --config Release --parallel 4
 cmake --build build-windows --config Release --target trans_qmllint
 ctest --test-dir build-windows -C Release --output-on-failure

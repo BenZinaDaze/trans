@@ -18,7 +18,7 @@ if (Test-Path $stage) { throw "Staging directory already exists: $stage" }
 cmake --install $BuildDir --config Release --prefix $stage
 $application = Join-Path $stage 'trans.exe'
 $helper = Join-Path $stage 'trans_selection_helper.exe'
-if (!(Test-Path $application) -or !(Test-Path $helper)) { throw 'Install with CMAKE_INSTALL_BINDIR=.' }
+if (!(Test-Path $application) -or !(Test-Path $helper)) { throw 'Configure with "-DCMAKE_INSTALL_BINDIR=." (quote the entire argument in PowerShell).' }
 & (Join-Path $QtRoot 'bin/windeployqt.exe') --release --no-compiler-runtime --qmldir (Join-Path $root 'qml') $application $helper
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
