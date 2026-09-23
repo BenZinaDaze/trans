@@ -1,0 +1,213 @@
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, SpinBox, TextEdit } from "std-widgets.slint";
+
+export struct SettingField { key: string, label: string, value: string, secret: bool, multiline: bool, toggle: bool, choices: [string], choice-index: int }
+export component TranslationWindow inherits Window {
+    title: "Trans · 选区翻译";
+    forward-focus: popup-keys;
+    preferred-width: 520px; preferred-height: 480px;
+    min-width: 360px; min-height: 320px;
+    background: Palette.background; default-font-size: 14px;
+    in property <string> source-text;
+    in property <string> translated-text;
+    in property <string> status-text;
+    in property <string> provider-name;
+    in property <string> language-text;
+    in property <bool> busy;
+    in property <bool> source-is-ocr;
+    in property <int> text-size: 17;
+    in-out property <bool> pinned: true;
+    always-on-top: root.pinned;
+    callback settings(int); callback retry(); callback cancel(); callback copy(); callback close-popup();
+    popup-keys := FocusScope {
+    width: parent.width; height: parent.height;
+    key-pressed(event) => { if event.text == Key.Escape { root.close-popup(); return accept; } return reject; }
+    VerticalLayout {
+        padding: 12px; spacing: 10px;
+        HorizontalLayout {
+            spacing: 10px;
+            Text { text: "Trans"; color: #5367d9; font-size: 22px; font-weight: 700; }
+            Text { text: root.source-is-ocr ? "截图翻译" : "选区翻译"; color: #747986; horizontal-stretch: 1; }
+            Button { text: "设置"; clicked => { root.settings(0); } }
+        }
+        Text { text: "原文"; color: #747986; }
+        TextEdit { text: root.source-text; read-only: true; wrap: word-wrap; vertical-stretch: 1; min-height: 50px; font-size: root.text-size * 1px; }
+        HorizontalLayout {
+            Text { text: root.language-text; color: #5367d9; horizontal-stretch: 1; }
+            Button { text: "语言"; clicked => { root.settings(1); } }
+        }
+        HorizontalLayout {
+            Text { text: "译文"; font-weight: 600; horizontal-stretch: 1; }
+            Text { text: root.provider-name; color: #747986; }
+        }
+        result-edit := TextEdit { text: root.translated-text; read-only: true; wrap: word-wrap; vertical-stretch: 2; min-height: 60px; font-size: root.text-size * 1px; }
+        Text { text: root.status-text; wrap: word-wrap; color: #747986; }
+        HorizontalLayout {
+            Button { text: "复制译文"; enabled: root.translated-text != ""; clicked => { result-edit.select-all(); result-edit.copy(); root.copy(); } }
+            Button { text: "重新翻译"; enabled: !root.busy && root.source-text != ""; clicked => { root.retry(); } }
+            Button { text: "取消"; enabled: root.busy; clicked => { root.cancel(); } }
+        }
+    }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    title: "Trans · 配置中心";
+    forward-focus: settings-keys;
+    preferred-width: 940px; preferred-height: 740px;
+    min-width: 600px; min-height: 460px;
+    background: Palette.background; default-font-size: 14px;
+    in-out property <int> page: 0;
+    in-out property <int> provider-index: 0;
+    in property <[SettingField]> fields;
+    in property <string> app-version;
+    in property <string> feedback;
+    in property <string> tool-result;
+    in property <[string]> models;
+    in property <bool> busy;
+    in-out property <bool> pinned;
+    always-on-top: root.pinned;
+    callback page-changed(int); callback provider-changed(int);
+    callback field-changed(string,string); callback fetch-models(); callback select-model(string);
+    callback test-provider(); callback cancel-tool(); callback save(); callback discard(); callback close-settings();
+    in-out property <string> recording-key;
+    callback shortcut-recorded(string,string,bool,bool,bool,bool);
+    settings-keys := FocusScope {
+    width: parent.width; height: parent.height;
+    key-pressed(event) => { if event.text == Key.Escape { root.close-settings(); return accept; } return reject; }
+    recorder := FocusScope {
+        key-pressed(event) => {
+            if root.recording-key == "" { return reject; }
+            if event.text == Key.Escape { root.recording-key = ""; return accept; }
+            if event.text == Key.Control || event.text == Key.Shift || event.text == Key.Alt || event.text == Key.Meta { return accept; }
+            root.shortcut-recorded(root.recording-key,event.text,event.modifiers.control,event.modifiers.alt,event.modifiers.shift,event.modifiers.meta);
+            root.recording-key = "";
+            return accept;
+        }
+    }
+    HorizontalLayout {
+        padding: 14px; spacing: 22px;
+        VerticalLayout {
+            width: 165px; spacing: 12px;
+            Text { text: "Trans"; font-size: 28px; font-weight: 700; color: #5367d9; }
+            Text { text: "偏好设置"; color: #747986; }
+            for label[index] in ["翻译服务", "翻译偏好", "快捷键与窗口", "截图 OCR"] : Button {
+                text: label; primary: root.page == index;
+                clicked => { root.page = index; root.page-changed(index); }
+            }
+            Rectangle { vertical-stretch: 1; background: transparent; }
+            Text { text: root.app-version; color: #747986; font-size: 12px; }
+        }
+        VerticalLayout {
+            spacing: 12px;
+            Text { text: ["翻译服务", "翻译偏好", "快捷键与窗口", "截图 OCR"][root.page]; font-size: 25px; font-weight: 600; }
+            if root.page == 0 : ComboBox {
+                model: ["OpenAI", "DeepSeek"]; current-index <=> root.provider-index;
+                selected(value) => { root.provider-changed(self.current-index); }
+            }
+            ScrollView {
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: always-off;
+                content-width: self.visible-width;
+                VerticalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    // Fluent scrollbars overlay 14px of the viewport; keep fields clear.
+                    padding-right: 20px;
+                    for field in root.fields : VerticalLayout {
+                        spacing: 5px;
+                        alignment: start;
+                        Text { text: field.label; wrap: word-wrap; }
+                        if field.key == "shortcut" || field.key == "screenshotShortcut" : HorizontalLayout {
+                            Button { text: root.recording-key == field.key ? "按下快捷键（Esc 取消）" : "录制快捷键"; clicked => { root.recording-key = field.key; recorder.focus(); } }
+                            Button { text: "清空"; clicked => { root.field-changed(field.key,""); root.page-changed(root.page); } }
+                        }
+                        if field.toggle : CheckBox { checked: field.value == "true"; text: "启用"; toggled => { root.field-changed(field.key,self.checked ? "true" : "false"); } }
+                        if field.choices.length > 0 : ComboBox { model: field.choices; current-index: field.choice-index; selected(value) => { root.field-changed(field.key,value); } }
+                        if !field.multiline && !field.toggle && field.choices.length == 0 : LineEdit {
+                            text: field.value; input-type: field.secret ? password : text;
+                            edited(value) => { root.field-changed(field.key,value); }
+                        }
+                        if field.multiline : TextEdit {
+                            text: field.value; min-height: 110px; preferred-height: 110px; wrap: word-wrap;
+                            edited => { root.field-changed(field.key,self.text); }
+                        }
+                    }
+                }
+            }
+            if root.page == 0 : HorizontalLayout {
+                Button { text: "获取模型"; enabled: !root.busy; clicked => { root.fetch-models(); } }
+                ComboBox { model: root.models; selected(value) => { root.select-model(value); } }
+                Button { text: "测试翻译"; enabled: !root.busy; clicked => { root.test-provider(); } }
+                Button { text: "取消"; enabled: root.busy; clicked => { root.cancel-tool(); } }
+            }
+            if root.tool-result != "" : TextEdit { text: root.tool-result; read-only: true; wrap: word-wrap; preferred-height: 80px; }
+            Text { text: root.feedback; wrap: word-wrap; color: #5367d9; }
+            HorizontalLayout {
+                Button { text: "放弃修改"; clicked => { root.discard(); } }
+                Button { text: "保存全部"; primary: true; enabled: !root.busy; clicked => { root.save(); } }
+                Button { text: "关闭"; clicked => { root.close-settings(); } }
+            }
+        }
+    }
+    }
+}
+
+export component CaptureWindow inherits Window {
+    title: "Trans · 区域截图"; no-frame: true; always-on-top: true;
+    forward-focus: capture-keys;
+    in property <image> screen-image;
+    in-out property <float> start-x; in-out property <float> start-y;
+    in-out property <float> end-x; in-out property <float> end-y;
+    in-out property <bool> dragging: false;
+    callback selected(float,float,float,float); callback cancelled();
+    Image { source: root.screen-image; width: parent.width; height: parent.height; image-fit: fill; }
+    Rectangle { width: parent.width; height: parent.height; background: #00000055; }
+    Rectangle {
+        x: min(root.start-x,root.end-x)*1px; y: min(root.start-y,root.end-y)*1px;
+        width: abs(root.end-x - root.start-x)*1px; height: abs(root.end-y - root.start-y)*1px;
+        border-width: 2px; border-color: #8099ff; background: #ffffff11;
+    }
+    Text { x: 20px; y: 20px; text: "拖动选择翻译区域 · Esc 或右键取消"; color: white; }
+    TouchArea {
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right { root.cancelled(); }
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.start-x = self.mouse-x / 1px; root.start-y = self.mouse-y / 1px;
+                root.end-x = root.start-x; root.end-y = root.start-y; root.dragging = true;
+            }
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false; root.selected(root.start-x,root.start-y,root.end-x,root.end-y);
+            }
+        }
+        moved => { if root.dragging { root.end-x = self.mouse-x / 1px; root.end-y = self.mouse-y / 1px; } }
+    }
+    capture-keys := FocusScope { key-pressed(event) => { if event.text == Key.Escape { root.cancelled(); return accept; } return reject; } }
+}
+
+export component Tray inherits SystemTrayIcon {
+    icon: @image-url("../assets/trans.svg"); tooltip: "Trans · 选区与截图翻译";
+    in-out property <bool> tray-visible <=> root.visible;
+    callback show-translation(); callback translate-selection(); callback screenshot(); callback settings(); callback quit();
+    clicked => { root.show-translation(); }
+    Menu {
+        MenuItem { title: "显示翻译窗口"; activated => { root.show-translation(); } }
+        MenuItem { title: "翻译选区"; activated => { root.translate-selection(); } }
+        MenuItem { title: "截图翻译"; activated => { root.screenshot(); } }
+        MenuItem { title: "设置"; activated => { root.settings(); } }
+        MenuItem { title: "退出"; activated => { root.quit(); } }
+    }
+}
+
+export component FailureWindow inherits Window {
+    title: "Trans · 无法启动";
+    preferred-width: 520px; preferred-height: 220px;
+    background: Palette.background;
+    in property <string> message;
+    callback exit();
+    VerticalLayout {
+        padding: 20px; spacing: 16px;
+        Text { text: "无法启动 Trans"; font-size: 22px; font-weight: 600; }
+        Text { text: root.message; wrap: word-wrap; vertical-stretch: 1; }
+        Button { text: "关闭"; clicked => { root.exit(); } }
+    }
+}

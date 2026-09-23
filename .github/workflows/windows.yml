@@ -16,11 +16,14 @@ concurrency:
 
 jobs:
   build:
-    name: MSVC / Qt 6.8.3 x64
+    name: MSVC / Slint 1.18.1 x64
     runs-on: windows-2022
-    timeout-minutes: 40
+    timeout-minutes: 90
     env:
-      QT_VERSION: '6.8.3'
+      RUST_TOOLCHAIN: '1.98.1'
+      CARGO_BUILD_JOBS: '2'
+      VCPKG_COMMIT: '9e593bb18ea69cc5095e012465dcd675a822ed0d'
+      SLINT_NO_QT: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -34,36 +37,37 @@ jobs:
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME.StartsWith('v') -and $env:GITHUB_REF_NAME -ne "v$($Matches[1])") {
             throw 'Release tag must match CMake version'
           }
-      - name: Install pinned Qt SDK
+      - name: Check out pinned native dependencies
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ env.VCPKG_COMMIT }} # 2026.07.29
+          path: .deps/vcpkg
+          persist-credentials: false
+      - name: Install pinned Rust and native dependencies
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          python -m pip install aqtinstall==3.3.0
-          python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -O "$env:RUNNER_TEMP/Qt" --archives qtbase qtdeclarative qtsvg qttools
-          $qt = "$env:RUNNER_TEMP/Qt/$env:QT_VERSION/msvc2022_64"
-          "QT_ROOT=$qt" >> $env:GITHUB_ENV
-          "$qt/bin" >> $env:GITHUB_PATH
-      - name: Build and test
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
+          rustup default $env:RUST_TOOLCHAIN
+          & ./.deps/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          & ./.deps/vcpkg/vcpkg.exe install 'curl[core,ssl,http2,winidn]:x64-windows' 'libpng:x64-windows' 'nlohmann-json:x64-windows' --clean-after-build
+      - name: Build and test native applications
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          cmake -S . -B build-windows -G 'Visual Studio 17 2022' -A x64 "-DCMAKE_PREFIX_PATH=$env:QT_ROOT" "-DCMAKE_INSTALL_BINDIR=." -DBUILD_TESTING=ON
-          cmake --build build-windows --config Release --parallel 4
-          cmake --build build-windows --config Release --target trans_qmllint
-          try {
-            ctest --test-dir build-windows -C Release --output-on-failure
-          } finally {
-            Get-ChildItem build-windows/*-test.txt | ForEach-Object {
-              Write-Output "::group::$($_.Name)"
-              Get-Content $_.FullName
-              Write-Output '::endgroup::'
-            }
-          }
+          $vcpkg = Join-Path $env:GITHUB_WORKSPACE '.deps/vcpkg'
+          cmake -S . -B build-windows -G 'Visual Studio 17 2022' -A x64 "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=x64-windows" "-DRust_TOOLCHAIN=$env:RUST_TOOLCHAIN" "-DCMAKE_INSTALL_BINDIR=." "-DCMAKE_INSTALL_LIBDIR=." -DBUILD_TESTING=ON
+          cmake --build build-windows --config Release --parallel 2
+          # The driver shares the production networking DLLs; keep their directory
+          # on PATH for the real local-HTTP business regression, not for packaging.
+          $env:PATH = "$vcpkg/installed/x64-windows/bin;$env:PATH"
+          ctest --test-dir build-windows -C Release --output-on-failure --no-tests=error
       - name: Deploy, smoke and package
         shell: pwsh
-        run: ./packaging/deploy-windows.ps1 -BuildDir build-windows -QtRoot "$env:QT_ROOT" -QtVersion "$env:QT_VERSION" -OutputDir "$env:RUNNER_TEMP/trans-windows"
+        run: ./packaging/deploy-windows.ps1 -BuildDir build-windows -DependenciesRoot .deps/vcpkg/installed/x64-windows -RustToolchain "$env:RUST_TOOLCHAIN" -OutputDir "$env:RUNNER_TEMP/trans-windows"
       - name: Upload verified package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -71,7 +75,7 @@ jobs:
           path: |
             ${{ runner.temp }}/trans-windows/*.zip
             ${{ runner.temp }}/trans-windows/SHA256SUMS-windows-x64
-            ${{ runner.temp }}/trans-windows/windows-settings-preview.png
+            ${{ runner.temp }}/trans-windows/windows-runtime-files.csv
           if-no-files-found: error
           retention-days: 14
 
@@ -100,6 +104,7 @@ jobs:
           cd packages
           sha256sum --check SHA256SUMS-windows-x64
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --title "Trans $RELEASE_TAG" --generate-notes
+            gh release create "$RELEASE_TAG" --verify-tag --title "Trans $RELEASE_TAG" --generate-notes \
+              --notes '![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/v1.18.1/logo/MadeWithSlint-logo-whitebg.png)'
           fi
           gh release upload "$RELEASE_TAG" ./*.zip SHA256SUMS-windows-x64 --clobber

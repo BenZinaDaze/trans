@@ -17,7 +17,7 @@ jobs:
   build:
     name: Build and verify x86_64 package
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 90
     outputs:
       version: ${{ steps.prepare.outputs.version }}
     steps:
@@ -42,7 +42,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/trans-packages"
       - name: Pull official Arch Linux image
         run: docker pull archlinux:base-devel
-      - name: Build package, lint QML and run tests
+      - name: Build Qt-free Slint package and run native checks
         run: |
           docker run --rm \
             --mount "type=bind,src=$RUNNER_TEMP/trans-input,dst=/input,readonly" \
@@ -96,6 +96,7 @@ jobs:
           # Reuse the release on reruns; replace only these named attachments.
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag \
-              --title "Trans $RELEASE_TAG" --generate-notes
+              --title "Trans $RELEASE_TAG" --generate-notes \
+              --notes '![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/v1.18.1/logo/MadeWithSlint-logo-whitebg.png)'
           fi
           gh release upload "$RELEASE_TAG" ./*.pkg.tar.zst SHA256SUMS --clobber

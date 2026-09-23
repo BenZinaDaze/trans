@@ -3,38 +3,66 @@
 pkgname=trans
 pkgver=@VERSION@
 pkgrel=1
-pkgdesc='Selection translator for KDE Plasma X11 (Qt 6)'
+pkgdesc='Desktop selection and screenshot translator (C++ and Slint)'
 arch=('x86_64')
 url=@PROJECT_URL@
-# The project has not selected a license; do not claim an open-source license.
+# The application has not selected an open-source license. Bundled third-party
+# notices do not change the license of Trans itself.
 license=('LicenseRef-Unknown')
-depends=('gcc-libs' 'glibc' 'qt6-base' 'qt6-declarative' 'qt6-svg'
-         'kglobalaccel' 'kwindowsystem' 'ca-certificates' 'hicolor-icon-theme')
-makedepends=('cmake' 'ninja')
-checkdepends=('dbus' 'desktop-file-utils' 'ttf-dejavu' 'noto-fonts-cjk')
+depends=('gcc-libs' 'glibc' 'curl' 'libpng' 'dbus' 'libxcb' 'libx11'
+         'libxcursor' 'libxrandr' 'libxi' 'libxkbcommon' 'libxkbcommon-x11'
+         'wayland' 'fontconfig' 'freetype2' 'libglvnd'
+         'ca-certificates' 'hicolor-icon-theme')
+makedepends=('cmake' 'ninja' 'git' 'pkgconf' 'rustup' 'nlohmann-json' 'python')
+checkdepends=('desktop-file-utils' 'xorg-server-xvfb' 'xorg-xauth' 'mesa'
+              'ttf-dejavu' 'noto-fonts-cjk')
 optdepends=('noto-fonts-cjk: Chinese interface and CJK translation text'
-            'xdg-desktop-portal: Future Wayland region screenshot backend'
-            'xdg-desktop-portal-kde: KDE Portal backend (region support required)')
+            'kglobalaccel: KDE global shortcut service (D-Bus only)'
+            'xdg-desktop-portal: Wayland area screenshots (Screenshot interface v3 required)'
+            'xdg-desktop-portal-kde: KDE screenshot Portal backend with area target support')
 options=('!debug' '!lto')
 source=("trans-${pkgver}.tar.gz")
 sha256sums=('@SOURCE_SHA256@')
+_rust_toolchain=1.98.1
 
 build() {
+    export RUSTUP_TOOLCHAIN="$_rust_toolchain"
+    export CARGO_BUILD_JOBS="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+    rustup toolchain install "$_rust_toolchain" --profile minimal --no-self-update
     cmake -S "$srcdir/trans-$pkgver" -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr \
-        -DCMAKE_PREFIX_PATH=/usr \
-        -DBUILD_TESTING=ON \
-        -DTRANS_X11_TESTS=OFF
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DRust_TOOLCHAIN="$_rust_toolchain" \
+        -DBUILD_TESTING=ON
     cmake --build build --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
-    cmake --build build --target trans_qmllint
+    python "$srcdir/trans-$pkgver/packaging/runtime-notices.py" \
+        --slint-source "$srcdir/build/_deps/slint-src" \
+        --target x86_64-unknown-linux-gnu \
+        --rust-toolchain "$_rust_toolchain" \
+        --output "$srcdir/build/runtime-licenses"
 }
 
 check() {
-    ctest --test-dir build --output-on-failure
+    ctest --test-dir build --output-on-failure --no-tests=error
     desktop-file-validate "$srcdir/trans-$pkgver/data/io.github.trans.Trans.desktop"
+    install -dm700 "$srcdir/smoke-runtime" "$srcdir/smoke-config"
+    local output
+    output=$(timeout 30s dbus-run-session -- xvfb-run -a \
+        -s '-screen 0 1600x1000x24 -nolisten tcp' \
+        env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 SLINT_BACKEND=winit-femtovg \
+        LIBGL_ALWAYS_SOFTWARE=1 XDG_RUNTIME_DIR="$srcdir/smoke-runtime" \
+        XDG_CONFIG_HOME="$srcdir/smoke-config" "$srcdir/build/trans" --smoke-test)
+    printf '%s\n' "$output"
+    [[ $output == *TRANS_SMOKE_PASS* ]]
 }
 
 package() {
-    DESTDIR="$pkgdir" cmake --install build
+    # Slint's SDK registers its own install rules. Ship only the application's
+    # explicit runtime component, never compiler tools, headers, or CMake exports.
+    DESTDIR="$pkgdir" cmake --install build --component Runtime
+    install -dm755 "$pkgdir/usr/share/licenses/trans/third-party"
+    cp -a "$srcdir/build/runtime-licenses/." "$pkgdir/usr/share/licenses/trans/third-party/"
+    install -Dm644 /usr/share/licenses/nlohmann-json/LICENSE.MIT \
+        "$pkgdir/usr/share/licenses/trans/nlohmann-json-LICENSE.MIT"
 }

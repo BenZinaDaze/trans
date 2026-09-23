@@ -3,12 +3,12 @@
   "configurePresets": [
     {
       "name": "dev",
-      "displayName": "Arch Linux system Qt / Debug",
+      "displayName": "C++ / Slint Winit-FemtoVG Debug",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_PREFIX_PATH": "/usr",
+        "Rust_TOOLCHAIN": "1.98.1",
         "BUILD_TESTING": "ON"
       }
     },
