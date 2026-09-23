@@ -1,271 +1,111 @@
 cmake_minimum_required(VERSION 3.24)
-project(
-  trans
-  VERSION 1.2.0
-  LANGUAGES CXX)
-
+project(trans VERSION 2.0.0 LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(MSVC)
+  add_compile_options(/utf-8)
+endif()
 include(GNUInstallDirs)
 include(CTest)
-
-find_package(
-  Qt6 6.5 REQUIRED
-  COMPONENTS Core
-             Gui
-             Widgets
-             Network
-             Qml
-             Quick
-             QuickControls2)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  find_package(Qt6 REQUIRED COMPONENTS DBus)
-  find_package(KF6GlobalAccel REQUIRED)
-  find_package(KF6WindowSystem REQUIRED)
-elseif(WIN32)
-  if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR CMAKE_SYSTEM_PROCESSOR MATCHES
-                                        "^(ARM64|arm64|aarch64)$")
-    message(FATAL_ERROR "The Windows backend requires x64.")
-  endif()
-  if(Qt6_VERSION VERSION_LESS 6.8)
-    message(
-      FATAL_ERROR "Windows builds require Qt 6.8 or newer; CI uses Qt 6.8.3.")
-  endif()
-  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE
-                          WINVER=0x0A00 _WIN32_WINNT=0x0A00)
+include(FetchContent)
+find_package(Threads REQUIRED)
+find_package(CURL 7.85 REQUIRED)
+find_package(PNG REQUIRED)
+find_package(nlohmann_json 3.11 QUIET)
+if(NOT nlohmann_json_FOUND)
+  FetchContent_Declare(json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.12.0 GIT_SHALLOW TRUE)
+  FetchContent_MakeAvailable(json)
+endif()
+set(Rust_TOOLCHAIN "1.98.1" CACHE STRING "Slint build toolchain")
+set(SLINT_STYLE "fluent" CACHE STRING "Shared widget style")
+if(Slint_DIR)
+  find_package(Slint 1.18.1 EXACT CONFIG REQUIRED)
 else()
-  message(FATAL_ERROR "Trans supports Linux and Windows x64 backends.")
+  set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+  set(SLINT_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(SLINT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(SLINT_BUILD_RUNTIME ON CACHE BOOL "" FORCE)
+  set(SLINT_FEATURE_COMPILER ON CACHE BOOL "" FORCE)
+  set(SLINT_LIBRARY_CARGO_FLAGS "--locked" CACHE STRING "" FORCE)
+  foreach(feature BACKEND_QT BACKEND_LINUXKMS INTERPRETER LIVE_PREVIEW RENDERER_SOFTWARE SDF_FONTS RENDERER_SKIA RENDERER_SKIA_OPENGL RENDERER_SKIA_VULKAN RENDERER_VELLO RENDERER_FEMTOVG_WGPU GETTEXT TESTING SYSTEM_TESTING MCP)
+    set(SLINT_FEATURE_${feature} OFF CACHE BOOL "" FORCE)
+  endforeach()
+  foreach(feature BACKEND_WINIT RENDERER_FEMTOVG ACCESSIBILITY SYSTEM_TRAY)
+    set(SLINT_FEATURE_${feature} ON CACHE BOOL "" FORCE)
+  endforeach()
+  find_package(Git REQUIRED)
+  FetchContent_Declare(Corrosion GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git GIT_TAG 1499b14e4906a2890f5cee1547c8848db261753d GIT_SUBMODULES "")
+  FetchContent_Declare(Slint
+    URL https://codeload.github.com/slint-ui/slint/tar.gz/refs/tags/v1.18.1
+    URL_HASH SHA256=fe485305ed303215e76c04918ee9aefbffbe229f18f979098ec36c7fa1dab28b
+    SOURCE_SUBDIR api/cpp
+    PATCH_COMMAND ${GIT_EXECUTABLE} apply --unidiff-zero ${CMAKE_CURRENT_SOURCE_DIR}/cmake/slint-x11-window.patch)
+  FetchContent_MakeAvailable(Slint)
+  corrosion_set_cargo_flags(slint-compiler --locked)
 endif()
-qt_standard_project_setup(REQUIRES 6.5)
-set(QT_QML_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/qml")
-if(MSVC)
-  add_compile_options(/utf-8 /W4)
+get_target_property(trans_slint_features Slint::Slint SLINT_ENABLED_FEATURES)
+foreach(feature BACKEND_WINIT RENDERER_FEMTOVG ACCESSIBILITY SYSTEM_TRAY)
+  if(NOT feature IN_LIST trans_slint_features)
+    message(FATAL_ERROR "Slint SDK must enable ${feature}")
+  endif()
+endforeach()
+if(BACKEND_QT IN_LIST trans_slint_features)
+  message(FATAL_ERROR "Qt Slint backend is forbidden")
 endif()
-
-qt_add_library(
-  trans_platform
-  STATIC
-  src/screenshot.h
-  src/region_capture.h
-  src/region_capture.cpp
-  src/platform/platform_error.h
-  src/platform/platform_services.h
-  src/platform/platform_services.cpp
-  src/platform/selection_reader.h
-  src/platform/shortcut_service.h
-  src/platform/screenshot_service.h
-  src/platform/window_integration.h
-  src/platform/instance_channel.h
-  src/platform/settings_storage.h)
-target_include_directories(trans_platform PUBLIC src)
-target_link_libraries(trans_platform PUBLIC Qt6::Core Qt6::Gui Qt6::Widgets)
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  qt_add_library(
-    trans_platform_linux
-    STATIC
-    src/platform/linux/selection_reader_linux.cpp
-    src/platform/linux/shortcut_service_linux.cpp
-    src/platform/linux/window_integration_linux.cpp
-    src/platform/linux/platform_services_linux.cpp
-    src/platform/linux/screenshot_service_linux.cpp
-    src/platform/linux/portal_screenshot.h
-    src/platform/linux/portal_screenshot.cpp
-    src/platform/linux/x11_screenshot.h
-    src/platform/linux/x11_screenshot.cpp
-    src/platform/linux/instance_channel_linux.h
-    src/platform/linux/instance_channel_linux.cpp
-    src/platform/linux/settings_storage_linux.cpp)
-  target_include_directories(trans_platform_linux PUBLIC src)
-  target_link_libraries(
-    trans_platform_linux
-    PRIVATE trans_platform
-            Qt6::Core
-            Qt6::Gui
-            Qt6::Widgets
-            Qt6::Network
-            Qt6::DBus
-            KF6::GlobalAccel
-            KF6::WindowSystem)
-  set(trans_native_target trans_platform_linux)
-elseif(WIN32)
-  qt_add_library(
-    trans_platform_windows
-    STATIC
-    src/platform/windows/platform_services_windows.cpp
-    src/platform/windows/shortcut_service_windows.cpp
-    src/platform/windows/window_integration_windows.cpp
-    src/platform/windows/source_context_windows.h
-    src/platform/windows/selection_reader_windows.cpp
-    src/platform/windows/selection_protocol_windows.h
-    src/platform/windows/screenshot_service_windows.cpp
-    src/platform/windows/instance_channel_windows.cpp
-    src/platform/windows/settings_storage_windows.cpp)
-  target_include_directories(trans_platform_windows PUBLIC src)
-  target_link_libraries(
-    trans_platform_windows
-    PRIVATE trans_platform
-            Qt6::Network
-            user32
-            advapi32
-            dwmapi
-            ole32
-            uuid)
-  set(trans_native_target trans_platform_windows)
-  qt_add_executable(trans_selection_helper
-                    src/platform/windows/selection_helper_main.cpp)
-  target_include_directories(trans_selection_helper PRIVATE src)
-  target_link_libraries(
-    trans_selection_helper PRIVATE Qt6::Core ole32 oleaut32 uiautomationcore
-                                   user32 advapi32)
-  install(TARGETS trans_selection_helper
-          RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
-
-qt_add_library(trans_core STATIC)
-qt_add_qml_module(
-  trans_core
-  URI
-  Trans.Core
-  VERSION
-  1.0
-  SOURCES
-  src/translation.h
-  src/translation.cpp
-  src/providers.h
-  src/providers.cpp
-  src/provider_tools.h
-  src/provider_tools.cpp
-  src/settings.h
-  src/settings.cpp
-  src/controller.h
-  src/controller.cpp
-  src/ocr.h
-  src/ocr.cpp
-  src/desktop.h
-  src/desktop.cpp)
-target_include_directories(trans_core PUBLIC src)
-target_link_libraries(
-  trans_core
-  PUBLIC Qt6::Core
-         Qt6::Gui
-         Qt6::Widgets
-         Qt6::Network
-         Qt6::Qml
-         Qt6::Quick
-         trans_platform
-  PRIVATE ${trans_native_target})
-if(MSVC)
-  target_compile_options(trans_core PRIVATE /W4)
-else()
-  target_compile_options(trans_core PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
-qt_add_executable(trans src/main.cpp)
+add_library(trans_business STATIC src/native/business.cpp)
+target_include_directories(trans_business PUBLIC src/native)
+target_link_libraries(trans_business PUBLIC CURL::libcurl nlohmann_json::nlohmann_json Threads::Threads)
+add_executable(trans src/native/main.cpp)
+slint_target_sources(trans ui/app.slint)
 target_compile_definitions(trans PRIVATE TRANS_VERSION="${PROJECT_VERSION}")
-if(WIN32)
+target_link_libraries(trans PRIVATE trans_business Slint::Slint PNG::PNG)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(DESKTOP REQUIRED IMPORTED_TARGET dbus-1 xcb xcb-randr)
+  target_sources(trans PRIVATE src/native/platform_linux.cpp src/native/linux_x11.cpp src/native/linux_portal.cpp src/native/linux_shortcuts.cpp)
+  target_link_libraries(trans PRIVATE PkgConfig::DESKTOP)
+  set_target_properties(trans PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+  install(FILES data/io.github.trans.Trans.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications COMPONENT Runtime)
+  install(FILES assets/trans.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps COMPONENT Runtime)
+elseif(WIN32)
+  enable_language(RC)
+  if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+    message(FATAL_ERROR "Windows builds require x64")
+  endif()
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE WINVER=0x0A00 _WIN32_WINNT=0x0A00)
+  add_library(trans_windows_platform STATIC src/native/platform_windows.cpp)
+  target_include_directories(trans_windows_platform PUBLIC src/native)
+  target_link_libraries(trans_windows_platform PUBLIC user32 gdi32 dwmapi advapi32 bcrypt shell32 ole32 uuid comctl32)
+  target_link_libraries(trans PRIVATE trans_windows_platform)
+  add_executable(trans_selection_helper src/native/selection_helper_windows.cpp)
+  target_link_libraries(trans_selection_helper PRIVATE user32 advapi32 bcrypt ole32 oleaut32 uiautomationcore uuid nlohmann_json::nlohmann_json)
   set_target_properties(trans PROPERTIES WIN32_EXECUTABLE TRUE)
   if(MSVC)
-    target_link_options(trans PRIVATE /MANIFEST:NO)
+    # Keep the GUI subsystem while running the CRT startup that calls main(argc, argv).
+    target_link_options(trans PRIVATE /ENTRY:mainCRTStartup /MANIFEST:NO)
   endif()
   configure_file(data/trans.rc.in "${CMAKE_CURRENT_BINARY_DIR}/trans.rc" @ONLY)
   target_sources(trans PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/trans.rc")
   add_dependencies(trans trans_selection_helper)
+  install(TARGETS trans_selection_helper RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT Runtime)
+  add_custom_command(TARGET trans POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:trans> $<TARGET_FILE_DIR:trans> COMMAND_EXPAND_LISTS)
+else()
+  message(FATAL_ERROR "Supported platforms: Linux and Windows x64")
 endif()
-set(trans_qml_files
-    qml/Main.qml
-    qml/SettingsWindow.qml
-    qml/ProviderPage.qml
-    qml/TranslationPage.qml
-    qml/DesktopPage.qml
-    qml/OcrPage.qml
-    qml/UiTheme.qml
-    qml/UiIcon.qml
-    qml/UiButton.qml
-    qml/UiField.qml
-    qml/UiCombo.qml
-    qml/UiSpin.qml
-    qml/UiCheck.qml
-    qml/UiTextArea.qml
-    qml/UiSection.qml
-    qml/UiScrollView.qml)
-foreach(qml_file IN LISTS trans_qml_files)
-  get_filename_component(qml_name "${qml_file}" NAME)
-  set_source_files_properties("${qml_file}" PROPERTIES QT_RESOURCE_ALIAS
-                                                       "${qml_name}")
-endforeach()
-qt_add_qml_module(
-  trans
-  URI
-  Trans
-  VERSION
-  1.0
-  QML_FILES
-  ${trans_qml_files})
-qt_add_resources(trans icons PREFIX "/" FILES assets/trans.svg)
-target_link_libraries(trans PRIVATE trans_core trans_coreplugin
-                                    Qt6::QuickControls2)
-
-install(TARGETS trans RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  install(FILES data/io.github.trans.Trans.desktop
-          DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
-  install(FILES assets/trans.svg
-          DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
-endif()
-
+install(TARGETS trans RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT Runtime)
+install(FILES $<TARGET_FILE:slint_cpp-shared> DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT Runtime)
 if(BUILD_TESTING)
-  find_package(Qt6 REQUIRED COMPONENTS Test)
-  qt_add_executable(trans_tests tests/test_trans.cpp)
-  target_link_libraries(trans_tests PRIVATE trans_core trans_coreplugin
-                                            Qt6::Test Qt6::QuickControls2)
-  target_compile_definitions(
-    trans_tests PRIVATE TRANS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-                        TRANS_VERSION="${PROJECT_VERSION}")
-  qt_add_executable(trans_ocr_tests tests/test_ocr.cpp)
-  target_link_libraries(trans_ocr_tests PRIVATE trans_core trans_coreplugin
-                                                Qt6::Test)
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(trans_tests PRIVATE Qt6::DBus)
-    target_link_libraries(trans_ocr_tests PRIVATE Qt6::DBus)
-  endif()
-  add_test(NAME trans_ocr COMMAND trans_ocr_tests -o -,txt -o trans_ocr-test.txt,txt)
-  add_test(NAME trans_core COMMAND trans_tests -o -,txt -o trans_core-test.txt,txt)
-  add_test(NAME trans_qml_smoke COMMAND trans --smoke-test)
-  set_tests_properties(
-    trans_core trans_ocr trans_qml_smoke
-    PROPERTIES ENVIRONMENT
-               "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_QUICK_CONTROLS_STYLE=Fusion" TIMEOUT 30)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_executable(trans_business_test_driver tests/test_native_business.cpp)
+  target_link_libraries(trans_business_test_driver PRIVATE trans_business)
+  add_test(NAME native_business COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_native_business.py --driver $<TARGET_FILE:trans_business_test_driver> -v)
+  set_tests_properties(native_business PROPERTIES TIMEOUT 90)
   if(WIN32)
-    set_property(TEST trans_core trans_ocr trans_qml_smoke APPEND PROPERTY
-                 ENVIRONMENT "QT_QPA_FONTDIR=$ENV{WINDIR}/Fonts")
-    qt_add_executable(trans_windows_instance_tests
-                      tests/test_windows_instance.cpp)
-    target_link_libraries(trans_windows_instance_tests
-                          PRIVATE trans_platform_windows Qt6::Test Qt6::Network)
-    qt_add_executable(trans_windows_storage_tests
-                      tests/test_windows_storage.cpp)
-    target_link_libraries(trans_windows_storage_tests
-                          PRIVATE trans_platform_windows Qt6::Test advapi32)
-    add_test(NAME trans_windows_instance COMMAND trans_windows_instance_tests
-             -o -,txt -o trans_windows_instance-test.txt,txt)
-    add_test(NAME trans_windows_storage COMMAND trans_windows_storage_tests
-             -o -,txt -o trans_windows_storage-test.txt,txt)
-    set_tests_properties(trans_windows_instance trans_windows_storage
-                         PROPERTIES TIMEOUT 120)
-  endif()
-  # Opt-in: sends real keys on the current KDE X11 desktop, using only temporary
-  # test data.
-  option(TRANS_X11_TESTS
-         "Build interactive KDE X11 regression tests (requires xdotool)" OFF)
-  if(TRANS_X11_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    qt_add_executable(trans_x11_tests tests/test_x11_escape.cpp)
-    target_link_libraries(
-      trans_x11_tests
-      PRIVATE trans_core trans_coreplugin Qt6::Test Qt6::QuickControls2
-              KF6::GlobalAccel KF6::WindowSystem)
-    target_compile_definitions(
-      trans_x11_tests PRIVATE TRANS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_executable(trans_windows_storage_tests tests/test_windows_storage.cpp)
+    target_link_libraries(trans_windows_storage_tests PRIVATE trans_windows_platform)
+    add_test(NAME native_windows_storage COMMAND trans_windows_storage_tests)
+    set_tests_properties(native_windows_storage PROPERTIES TIMEOUT 30)
   endif()
 endif()

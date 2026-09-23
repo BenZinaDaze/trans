@@ -1,0 +1,42 @@
+diff --git a/api/cpp/cbindgen.rs b/api/cpp/cbindgen.rs
+--- a/api/cpp/cbindgen.rs
++++ b/api/cpp/cbindgen.rs
+@@ -814,1 +814,2 @@
+             "slint_windowrc_hwnd_win32",
++            "slint_windowrc_xid_x11",
+diff --git a/api/cpp/include/private/slint_window.h b/api/cpp/include/private/slint_window.h
+--- a/api/cpp/include/private/slint_window.h
++++ b/api/cpp/include/private/slint_window.h
+@@ -792,1 +792,8 @@
++#if defined(__linux__) && !defined(SLINT_FEATURE_FREESTANDING)
++    /// Returns the X11 window ID, or zero on Wayland and before creation.
++    std::uint64_t x11_window_id() const
++    {
++        return cbindgen_private::slint_windowrc_xid_x11(&inner.handle());
++    }
++#endif
+     /// \private
+diff --git a/internal/core/window.rs b/internal/core/window.rs
+--- a/internal/core/window.rs
++++ b/internal/core/window.rs
+@@ -3255,1 +3255,20 @@
++    /// Trans C++ adapter: return the actual native X11 window, never a scanned window.
++    #[unsafe(no_mangle)]
++    pub unsafe extern "C" fn slint_windowrc_xid_x11(
++        handle: *const WindowAdapterRcOpaque,
++    ) -> u64 {
++        use raw_window_handle_06::HasWindowHandle;
++        if let Some(adapter) = has_window_handle(handle)
++            && let Ok(window) = adapter.window_handle()
++        {
++            match window.as_raw() {
++                raw_window_handle_06::RawWindowHandle::Xlib(x) => x.window as u64,
++                raw_window_handle_06::RawWindowHandle::Xcb(x) => x.window.get() as u64,
++                _ => 0,
++            }
++        } else {
++            0
++        }
++    }
++
+     /// Returns the `wl_surface` associated with this window, or null if it doesn't exist or isn't created yet.

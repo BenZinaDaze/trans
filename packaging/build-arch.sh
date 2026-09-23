@@ -2,9 +2,11 @@
 # Run as root in a disposable official Arch container; makepkg runs as builder.
 set -euo pipefail
 
-pacman -Syu --noconfirm --needed base-devel cmake ninja \
-    qt6-base qt6-declarative qt6-svg kglobalaccel kwindowsystem \
-    ca-certificates hicolor-icon-theme dbus desktop-file-utils ttf-dejavu noto-fonts-cjk
+pacman -Syu --noconfirm --needed base-devel cmake ninja git pkgconf rustup \
+    curl libpng dbus libxcb libx11 libxcursor libxrandr libxi libxkbcommon \
+    libxkbcommon-x11 wayland fontconfig freetype2 libglvnd nlohmann-json python \
+    ca-certificates hicolor-icon-theme desktop-file-utils \
+    xorg-server-xvfb xorg-xauth mesa ttf-dejavu noto-fonts-cjk
 useradd --create-home builder
 install -d -o builder -g builder /build
 cp /input/PKGBUILD /input/trans-*.tar.gz /build/

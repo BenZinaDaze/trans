@@ -1,248 +1,213 @@
 # 开发与维护指南
 
-本文面向 Trans 的开发者和维护者。安装、配置和日常使用见 [README](../README.md)。
+安装、配置和日常使用见 [README](../README.md)。本文描述当前 C++20 + Slint 实现，不再提供 Qt/QML 构建路径。
 
-## 本地构建与运行
+## 构建依赖与已验证范围
 
-Trans 使用 C++20、Qt 6 / QML；Linux 后端另需 KDE Frameworks 6。CMake 最低版本为 3.24，Linux 的 Qt 最低版本为 6.5，Windows 最低为 6.8。以下 Linux 开发命令使用 conda `myself`，构建链接系统 Qt/KDE 库，无需安装 Python 包；发行包运行不需要 conda。
+- CMake 3.24+、C++20 编译器、Ninja、Git、Rust **1.98.1**。
+- Slint **1.18.1**：Winit 后端、FemtoVG 渲染器、系统托盘和可访问性；在编译时关闭 Qt 后端。Rust 用于编译 Slint，应用业务仍是 C++。
+- libcurl **7.85+**、nlohmann/json **3.11+**、libpng、系统线程库。未找到系统 JSON 库时，CMake 获取锁定的 3.12.0。
+- Linux：libdbus-1、XCB/RandR；Winit/FemtoVG 还需要 X11/Wayland、xkbcommon、字体与 OpenGL/EGL 运行依赖。KGlobalAccel 是可选桌面服务，不链接 KF 库。
+- Windows x64：Win32、COM/UI Automation、GDI/DWM、原生 ACL 与命名管道；libcurl 使用启用证书验证的 TLS 后端，Windows 分发优先系统 Schannel。
+- 测试使用 Python 3 标准库和一个原生 C++ 驱动，不要求 QtTest、QML 工具或 Python 第三方包。
+
+本次迁移已有 **Linux 原生构建及真实 Slint 窗口 `--smoke-test` 通过**的记录，`native_business` CTest 也已通过；实际 UI 到本地 HTTP、X11 PRIMARY 读取和第二实例转发已经执行验证。Windows 后端/helper 通过 MinGW 交叉语法检查，但尚不能宣称 MSVC 或 Windows 桌面运行通过。真实 OpenAI/DeepSeek/百度 OCR、Wayland、多屏 DPI、完整窗口/快捷键交互等仍须分别验收，启动或局部回归成功不等于全部功能通过。
+
+## Linux 源码构建
+
+Arch Linux 开发依赖示例：
 
 ```sh
-sudo pacman -S --needed base-devel cmake ninja qt6-base qt6-declarative qt6-svg kglobalaccel kwindowsystem
-conda run -n myself --no-capture-output cmake --preset dev
-conda run -n myself --no-capture-output cmake --build --preset dev
-conda run -n myself --no-capture-output ctest --preset dev
-conda run -n myself --no-capture-output ./build/trans --settings
+sudo pacman -S --needed base-devel cmake ninja git pkgconf rustup \
+    curl nlohmann-json libpng dbus libxcb libx11 libxkbcommon libxkbcommon-x11 \
+    wayland fontconfig freetype2 libglvnd ca-certificates hicolor-icon-theme \
+    python noto-fonts-cjk
+rustup toolchain install 1.98.1 --profile minimal
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure
+./build/trans --settings
 ```
 
-也可先 `conda activate myself` 再执行命令，或在系统环境中直接执行去掉 `conda run -n myself --no-capture-output` 前缀的命令。预设指定系统 `/usr` 中的 Qt/KDE；不要通过 `QT_PLUGIN_PATH`、`QML_IMPORT_PATH`、`LD_LIBRARY_PATH` 混入另一套 Qt 库。
+默认构建会获取锁定版本的 Slint 源码和 Corrosion，用 Cargo 的锁文件构建；首次配置需要访问相应源码仓库及 crate 下载源。无需 conda，也不要设置旧版 `QT_PLUGIN_PATH` 或 `QML_IMPORT_PATH`。
 
-首次启动显示配置中心；以后可从托盘菜单、翻译弹窗右上角的设置图标或 `./build/trans --settings` 打开。语言栏右侧的箭头可直接打开翻译偏好。再次启动会将命令转交已有实例。`./build/trans --translate` 翻译当前选区；`./build/trans --ocr` 发起截图翻译。退出位于托盘菜单。
+`cmake --build build` 构建主程序及启用的测试。Slint 的界面编译直接属于应用构建，不存在 `trans_qmllint` 目标。
 
-### Windows 原生构建与部署
+### Slint 源码补丁与外部 SDK
 
-目标为 Windows 10 22H2 / Windows 11 x64，普通用户运行；不提供 ARM64 或 32 位构建。CI 固定使用 Windows runner、MSVC 2022 x64 和 Qt 6.8.3，Windows 不链接 Qt DBus、KF6 或 X11。安装 Visual Studio 2022 的 C++ 桌面组件、Qt 对应的 MSVC 2022 64 位组件、CMake、Python 和 PowerShell 7.4+ 后：
+上游 1.18.1 的 C++ 窗口接口没有本项目需要的 X11 窗口 ID 访问器。仓库的 [`cmake/slint-x11-window.patch`](../cmake/slint-x11-window.patch) 为同一个窗口适配器增加 `x11_window_id()`，通过 Slint 已有的 raw-window-handle 获取实际 XID；未创建窗口或 Wayland 返回 0。它不扫描其他窗口，也不把 Slint 私有 C++ 对象强转成系统句柄。
+
+**这是需要维护的源码补丁，不是宣称上游已经提供该 C++ API。** 默认源码构建自动应用它。Slint 升级必须重新核对补丁、生成的 C 绑定与 ABI，并重新运行窗口集成验收。
+
+使用自备 SDK 时，需要同时重建打过补丁的头文件、生成绑定和动态库；仅替换一个头文件不能使用。对一份干净的 Slint 1.18.1 源码应用补丁的命令为：
+
+```sh
+git -C /path/to/slint-1.18.1 apply --unidiff-zero /path/to/trans/cmake/slint-x11-window.patch
+```
+
+SDK 的功能开关必须与根 CMake 一致：启用 `BACKEND_WINIT`、`RENDERER_FEMTOVG`、`ACCESSIBILITY`、`SYSTEM_TRAY`，禁用 `BACKEND_QT`；不默认携带 Skia、Vello、LinuxKMS 或软件渲染器。构建及安装该 SDK 后，在独立构建目录指定它的配置目录：
+
+```sh
+cmake -S . -B build-sdk -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DSlint_DIR=/path/to/patched-sdk/lib/cmake/Slint
+cmake --build build-sdk --parallel 2
+```
+
+直接使用未修改的官方 Linux 1.18.1 SDK 缺少上述接口；不要通过扫描窗口或恢复 Qt 后端绕过这个错误。
+
+### Windows 原生构建
+
+目标为 Windows 10 22H2 / Windows 11 x64。安装 Visual Studio 2022 的 C++ 桌面组件、CMake、Git、Python、Rust 和 vcpkg，并在 x64 开发环境执行。以下使用已有的 `VCPKG_ROOT`；版本化发布以 Windows 工作流中锁定的依赖为准：
 
 ```powershell
-$qt = 'C:/Qt/6.8.3/msvc2022_64'
-$env:PATH = "$qt/bin;$env:PATH"
-cmake -S . -B build-windows -G 'Visual Studio 17 2022' -A x64 "-DCMAKE_PREFIX_PATH=$qt" "-DCMAKE_INSTALL_BINDIR=." -DBUILD_TESTING=ON
-cmake --build build-windows --config Release --parallel 4
-cmake --build build-windows --config Release --target trans_qmllint
+rustup toolchain install 1.98.1 --profile minimal
+& "$env:VCPKG_ROOT/vcpkg.exe" install 'curl[core,ssl]:x64-windows' libpng:x64-windows nlohmann-json:x64-windows
+cmake -S . -B build-windows -G 'Visual Studio 17 2022' -A x64 `
+    "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+    -DVCPKG_TARGET_TRIPLET=x64-windows -DBUILD_TESTING=ON
+cmake --build build-windows --config Release --parallel 2
 ctest --test-dir build-windows -C Release --output-on-failure
-./packaging/deploy-windows.ps1 -BuildDir build-windows -QtRoot $qt -QtVersion 6.8.3 -OutputDir dist-windows
+./build-windows/Release/trans.exe --smoke-test
 ```
 
-部署脚本使用 `windeployqt --qmldir qml` 收集两个 EXE 的 DLL/QML/插件依赖，并加入 app-local MSVC CRT、Qt 许可证、第三方声明和对应源码链接。暂未选择本项目许可证，不能把 Qt 的许可证当成本项目许可证。ZIP 在清除开发环境 Qt 路径后执行窗口启动及截图冒烟，再生成独立的 `SHA256SUMS-windows-x64`。重复部署应使用新的输出目录，避免混入旧包文件。主程序与取词 helper 必须一起分发，均使用动态 Qt 运行库。
+当前 vcpkg 的 curl `ssl` 功能在普通 Windows 目标选择系统 TLS 路径；不要虚构不存在的 `schannel` port feature。需要核对实际锁定的 port 和产物，不能仅凭构建参数推断最终 TLS 后端。MSVC 的源码编码必须使用 `/utf-8`。
 
-`.github/workflows/windows.yml` 在 push/PR 时构建、检查并上传 ZIP；版本标签通过 CMake 版本校验后才上传 Release。Windows 与 Arch 使用不同的校验文件，并通过同一 release 并发组串行上传附件。该流程未包含代码签名、安装器或自动更新。
+主程序和 `trans_selection_helper.exe` 必须一起分发。部署及工作流入口为 [`packaging/deploy-windows.ps1`](../packaging/deploy-windows.ps1)、[Windows 工作流](../.github/workflows/windows.yml)；它们收集实际原生 DLL、CRT 和第三方声明，不调用 `windeployqt`。不得从旧版目录带入 Qt DLL/QML 插件。Windows 编译或 CI 产物成功不能替代 Windows 10/11 普通用户桌面验收。
 
-Linux 上可以使用与官方 Qt MinGW 包匹配的交叉工具链做编译检查，但不能用交叉编译成功替代 Windows 执行结果。Windows CI 的 offscreen 启动也不能替代真实桌面取词、截图、快捷键和焦点验收。
+Windows 的 FemtoVG 渲染路径要求 OpenGL 2.0 驱动。GitHub 托管 Windows runner 默认不满足此条件，因此工作流在临时 runner 中安装固定版本 Mesa 软件 OpenGL 后运行真实分发程序的窗口冒烟；这不是禁用检查，也不是启用 Slint software renderer。Mesa 不进入应用 ZIP，用户机器仍需提供兼容显卡驱动；CI 通过不等于无驱动 Windows 环境可运行。
 
-## 架构与参考
+## 源码结构与执行模型
 
 ```text
-平台 ShortcutService → 异步 SelectionReader → TranslationController → OpenAI / DeepSeek
-                                                   ↓
-                                             QML 翻译弹窗
-
-QML 配置中心 → AppSettings + DesktopBridge（异步保存及平台能力编排）
-             → ProviderTools（获取模型、试译）
-main → InstanceChannel（单实例/命令转发）+ PlatformServices（平台服务所有权）
+ui/app.slint                    翻译窗口、四页设置、区域遮罩、系统托盘
+        ↕ Slint C++ 绑定
+src/native/main.cpp             UI 状态、设置草稿、任务代次、取消与命令装配
+        ├── business.h/.cpp      配置导入/校验、翻译、模型列表、百度 OCR
+        └── platform.h          原生能力与私有配置写入接口
+              ├── platform_linux.cpp + linux_*.cpp
+              └── platform_windows.cpp + selection_helper_windows.cpp
 ```
 
-`TranslationProvider` / `TranslationJob` 封装异步接口，统一结果和错误。`ProviderRegistry` 仅注册两家提供商。`AppSettings` 提供完整配置快照、校验与持久化；页面修改的是草稿，保存成功后统一生效。`ProviderTools` 使用独立的可取消请求，不改变当前选区翻译。
+- Slint 主线程拥有 GUI。业务接口是同步、可取消的 C++ 函数，使用 `std::jthread`/`std::stop_token` 在工作线程执行；结果通过 `slint::invoke_from_event_loop` 回到主线程。
+- 主翻译与设置页模型/试译任务有各自的代次。取消、关闭、替换任务后不得让迟到结果覆盖新状态。退出应取消并回收工作线程，再退出窗口循环。
+- `trans_business` 只依赖 curl、JSON、标准库与线程库；不引用 Slint 或平台 GUI 类型。
+- `Platform` 使用明确的字符串、像素缓冲区和来源对象。截图返回 RGBA 屏幕；共享 Slint 遮罩处理框选。Portal 可以直接返回已选择的区域。
+- UI 调用 Slint 的真实复制接口；不能只显示“已复制”却没有修改剪贴板。关闭窗口隐藏程序，托盘退出才结束事件循环。
+- 设置页编辑草稿。保存先校验、应用快捷键，再安全写入；失败尝试恢复旧绑定。恢复失败必须显式报告，不能把系统快捷键与文件保存描述为一个原子事务。
 
-参考 [Read Frog](https://github.com/mengxi-ream/read-frog) 的独立提供商、基础地址、模型、温度、推理级别、自定义请求头与参数配置方式，未引入其浏览器扩展或 AI SDK 依赖。参考版本：`0cd93f25d98018e1a502df4819ce8d22c5aa1254`，主要查阅 `src/utils/constants/providers.ts`、`src/types/config/provider/schemas.ts` 和 `src/utils/providers/model.ts`。协议实现依据 [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create)、[OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) 和 [DeepSeek Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion) 文档。
+### 平台边界
 
-### 平台能力边界
+**Linux：** XCB 读取 X11 PRIMARY，不读旧 CLIPBOARD 冒充当前选区，处理 UTF8_STRING/TARGETS、INCR、所有者消失、超时与取消。X11 屏幕捕获和窗口操作使用 XCB/EWMH。全局快捷键经 libdbus 直接访问 KDE KGlobalAccel，保留组件 `trans`、动作 `translate-selection`/`translate-screenshot`；不链接 QtDBus 或 KF6。Linux 单实例保留服务 `io.github.trans.Trans`、路径 `/Trans` 及 `ShowTranslation`、`TranslateSelection`、`TranslateScreenshot`、`ShowSettings` 四个方法。
 
-`src/platform/` 定义 `SelectionReader`、`ShortcutService`、`ScreenshotService`、`WindowIntegration`、`InstanceChannel` 和配置存储边界；Linux 与 Windows 实现分别在 `src/platform/linux/`、`src/platform/windows/`。`main` 创建并注入 `PlatformServices`，QML 与控制器不包含 KDE、X11、D-Bus 或 Windows 类型。浮窗几何、托盘、普通剪贴板写入、翻译与 OCR 保持共享。
+Wayland 不开放任意应用选区读取。Screenshot Portal 必须提供版本 3 和区域目标 `AvailableTargets & 4` 才发起区域截图；不足时明确报错，不把整屏当区域上传。Portal 取消会关闭请求；显示与定位仍尊重 Wayland 权限边界。Slint 托盘在 Linux 使用桌面的 StatusNotifierItem/菜单服务，不能据 Linux 启动成功推断目标桌面已有托盘宿主。
 
-构建目标分为 `trans_platform`（公共接口和可复用框选组件）、`trans_platform_linux` / `trans_platform_windows`（按目标平台选择一个真实后端）、`trans_core`（业务/QML 门面）。Qt DBus 和 KF6 只由 Linux 后端使用；Linux 桌面文件与 X11 测试按平台启用。Windows 另构建 `trans_selection_helper.exe`，主程序包含图标、版本、普通用户权限及 Per-Monitor V2 DPI manifest。其他系统明确拒绝配置，不添加成功空实现。
+**Windows：** 原生消息线程处理 `RegisterHotKey`，UI Automation 取词在独立 COM MTA helper 进程中完成。来源 HWND/PID/TID、密码控件、高权限来源、焦点变化以及协议长度均属于安全边界。父进程限制 helper 时间和输出，用 Job Object 管理生命周期。截图使用 GDI/DWM，窗口使用公开 HWND 接口，不模拟 Ctrl+C 或 Alt 来取得文本或强抢焦点。单实例使用当前用户/登录会话隔离的命名互斥与受限命名管道。
 
-选区读取返回 `SelectionJob`，在呈现窗口前异步完成；`SourceContextPtr` 保存不透明来源信息。`selecting`、截图、OCR、翻译使用同一请求代次隔离迟到回调。任务由 QObject owner 管理，正常完成后延迟删除，取消应幂等且不得重复通知。平台错误使用 `PlatformError`，区分不支持、服务不可用、权限拒绝、无选区、冲突、超时与取消。
+屏幕坐标使用物理像素；Slint 逻辑框选坐标须与源像素正确映射。置顶、鼠标附近定位、从属设置窗口和恢复焦点通过平台能力执行；这些交互必须在真实目标桌面验收，而不是仅检查属性设置成功。
 
-快捷键通过 `ShortcutService::update(action, sequence, owner)` 异步更新，两个动作共享一个服务。`DesktopBridge::saveSettings` 不再返回同步成功值；`settingsBusy` 与 `settingsSaveFinished(bool)` 通知界面。保存请求串行处理，交换绑定前先释放两项，注册或持久化失败后尝试补偿；补偿失败明确显示错误和实际生效绑定，不能声称系统注册与配置文件构成原子事务。
+## 配置与服务协议
 
-`capabilities` 向界面提供选区、截图、快捷键、焦点恢复的状态及原因，不以 OS 名称判断功能。窗口激活仅是请求，不保证系统接受。Linux `InstanceChannel` 保留服务 `io.github.trans.Trans`、路径 `/Trans` 和四个固定方法；Windows 使用当前用户/登录会话隔离的本地 IPC。就绪前的调用等待处理，启动失败或超时返回错误，未知命令不执行。冒烟模式不注册实例与快捷键。
+### 新配置及旧 INI 导入
 
-### Windows 后端契约
+- Linux：`$XDG_CONFIG_HOME/trans/settings.json`，未设置时使用 `~/.config/trans/settings.json`。
+- Windows：通常为 `%LOCALAPPDATA%\trans\settings.json`，沿用当前用户应用目录；低完整性进程使用对应的 LocalAppDataLow。
+- JSON 根字段 `schemaVersion` 当前为 **1**。应用选项沿用原快照字段；`providerConfigs.openai` 与 `providerConfigs.deepseek` 分别保存 endpoint、model、apiKey、apiMode、temperatureEnabled、temperature、maxOutputTokens、reasoning、headersJson、optionsJson。
+- 仅当 JSON 不存在时读取同目录 `settings.ini`。导入覆盖原应用写出的分组、反斜线键、百分号键、Unicode、引号与换行转义、JSON 字符串、布尔及数字。
+- 旧 OpenAI 配置存在 endpoint 但没有 apiMode 时，导入为 `chat`、`reasoning=default`，保留密钥和模型。未知的已选服务报错，不静默切换提供商。
+- `loadSettings` 不创建或修改文件。调用方只有在导入校验和安全原子保存成功后才启用迁移结果，原 INI 保留。损坏、未知版本或缺少必需字段的 JSON 会报错，不重新导入 INI 覆盖它。
+- 不读取更早更名前的 `tran/settings.ini`。备份/清除密钥时同时处理保留的 INI 和 JSON。
 
-- **快捷键**：`RegisterHotKey` / `UnregisterHotKey` + Qt 原生事件过滤，使用 `MOD_NOREPEAT`；释放注册项后不再派发迟到事件。默认选区 `Ctrl+Alt+T`、截图 `Ctrl+Alt+O`，已保存配置不自动改写；冲突显示实际生效状态，不把注册失败说成成功。
-- **选区**：触发时捕获源 HWND/PID/TID；异步 helper 在 COM STA 中查询 UI Automation `TextPattern::GetSelection()`，支持无 HWND 的文档子节点及嵌入式跨进程控件，但祖先链必须回到捕获的源窗口。拒绝 Trans 自己、密码控件和更高权限来源，取词前后验证原生/UIA 焦点；无选区或不支持时不读取旧剪贴板、不模拟复制、不自动切换取图。
-- **helper 隔离**：使用限长、版本化的 stdin/stdout 协议，仅返回文本与枚举错误，不执行任意命令。父进程限制时间、输出大小和进程生命周期，取消/替换会终止本次 helper；Job Object 防止父进程退出后遗留辅助进程。没有每次取词共享一个永久卡死 COM 工作线程的路径。
-- **截图**：等待 Qt 提交隐藏窗口并同步 DWM 后，通过 `QScreen::grabWindow(0)` 获取各屏幕原始像素；复用 `RegionOverlay` 在单个起始屏幕内框选。取消、显示配置变化和超时立即隐藏全部遮罩，随后销毁。不保存图片历史，不保证识别受保护的黑色画面。
-- **窗口**：请求系统激活与焦点恢复，不强制抢焦点、不发送模拟 Alt 键。原生窗口样式隐藏浮窗任务栏项；翻译窗口同时保留 `WindowTitleHint`、`WindowSystemMenuHint` 和 `WindowCloseButtonHint`，Windows 原生关闭按钮依赖系统菜单样式。关闭仅隐藏浮窗、不退出托盘程序，并仅对仍存在且身份匹配的源窗口请求恢复。
-- **单实例**：命名互斥对象负责选举，受限的 `QLocalServer`/命名管道负责四个固定 `AppCommand` 转发。服务端校验客户端用户与登录会话，协议限长并有超时；只有命令已派发才确认，确认不代表翻译完成。主实例启动失败会拒绝待处理请求，不允许第二实例绕过失败自行注册快捷键。
+密钥为本地明文，不是加密保险库。Linux 应用目录/文件权限分别为 `0700`/`0600`；Windows 为当前用户和 SYSTEM 的受保护 DACL。同目录临时文件从写入前就受保护，原子替换失败保留旧内容，不回退为无保护保存。Windows 的 UTF-8 路径在标准文件系统边界使用 `std::filesystem::u8path`。
 
-### Windows 发布前桌面验收
+### 翻译与模型发现
 
-当前新增 Windows 后端仍需在 Windows 10 22H2 和 Windows 11 上分别完成下列原生验收；Linux 编译或 GitHub Windows Server runner 通过不等于已完成：
-
-- 干净普通用户环境完整解压 ZIP，无 Qt/VS 开发目录也能启动，中文、输入法、TLS 请求和 helper 均正常。
-- 记事本、Edge/Chrome、VS Code、终端和 PDF 阅读器中触发取词；无选区、无 TextPattern、密码框、管理员窗口明确失败且剪贴板保持不变。
-- 取词卡住、快速重复触发、切换源焦点、取消和退出；无迟到译文、无 helper 残留。
-- 两种快捷键触发、占用冲突、交换、持久化失败、恢复失败和退出后释放；另一程序能重新注册已释放的键。
-- 单屏以及多屏不同 DPI（100%、125%、150%、200%）、负坐标屏、截图 Esc/右键取消、显示器热插拔；截图不含 Trans 自己，框内像素对应选区。
-- 浮窗置顶/非置顶、设置窗口层级、Esc、系统拒绝激活以及关闭后恢复源窗口；右上角关闭按钮可见可用，点击后浮窗隐藏、托盘保留且可重新打开；Alt+Tab 不被不必要地改变。
-- 同时启动、启动期间转发、主实例退出及不同登录会话隔离；不丢命令、不重复注册、不跨会话转发。
-- 配置文件和临时文件的 DACL、保存失败保留旧内容；不要把本地明文配置描述为加密存储。
-
-## 配置与协议细节
-
-所有应用选项均可在页面修改，无需手动编辑配置文件。侧边栏分为翻译服务、翻译偏好、快捷键与窗口、截图 OCR，窄窗口下收起为图标导航；四页共用底部的 **保存全部** 按钮。“放弃修改”重新载入已保存值，关闭设置会丢弃未保存的输入。
-
-### API 提供商
-
-仅支持 **OpenAI** 和 **DeepSeek**，每家单独保存配置。
-
-| 提供商 | 默认地址 | 默认模型 | API |
+| 提供商 | 默认基础地址 | 默认模型 | 模式 |
 | --- | --- | --- | --- |
 | OpenAI | `https://api.openai.com/v1` | `gpt-5.6-luna` | 默认 Responses，可切换 Chat Completions |
 | DeepSeek | `https://api.deepseek.com` | `deepseek-flash` | Chat Completions |
 
-默认模型参考 Read Frog 的提供商预设；实际可用模型取决于账户和服务端。可点击“获取模型”查询，也可直接输入任意模型 ID。OpenAI 代理可通过修改基础地址接入，不额外增加提供商条目。程序会自动追加 `/responses`、`/chat/completions` 或 `/models`；地址不要包含这些末级路径。
+模型名称不保证账户有权限；DeepSeek 预设还包含 `deepseek-v4-pro`，也可输入任意模型 ID，或用当前草稿查询 `/models`。服务地址只填基础路径，程序追加 `/responses`、`/chat/completions` 或 `/models`。地址不允许用户名、查询参数或片段。
 
-页面提供以下选项：
+- 全部请求为非流式。OpenAI Responses 设置 `store=false`，只接受 `status=completed` 的 assistant 输出；Chat 拒绝截断结果。DeepSeek 不把 `reasoning_content` 当译文。
+- 默认不发送温度；启用后范围 0–2。输出 token 数为 0（服务默认）或 16–131072。Responses、OpenAI Chat、DeepSeek 分别使用 `max_output_tokens`、`max_completion_tokens`、`max_tokens`。
+- 推理 `default` 省略专用参数。DeepSeek 的 `none` 显式关闭 thinking；其他有效级别启用 thinking 并设置 reasoning_effort。
+- 请求头和高级参数须为 JSON 对象。Authorization、Content-Type 等由应用管理；model/messages/stream/temperature/reasoning/token 等专用字段不可通过高级参数覆盖。
+- 试译与正常翻译共用 `translate`，固定文本为 `Hello, world!`，使用未保存草稿，正常计费且不会自动保存。
+- TLS 和代理证书校验开启，不跟随重定向；curl multi 支持超时和主动取消。响应上限按解压后的内容计算，错误不回显服务端可能含密钥的文本。
 
-- API 密钥、基础地址、模型与 OpenAI API 模式。
-- 手动调整随机性（温度）：数值范围为 0–2，越低措辞通常越稳定。默认关闭，使用服务默认值；开启后才发送填写的温度参数。
-- 最大输出 token 数：0 为服务默认，或 16–131072；最终上限以模型为准。
-- 推理级别：默认关闭，可改为服务默认（省略参数）或提供商支持的级别。较旧模型不支持推理参数时选择“服务默认”。
-- 自定义请求头与额外请求参数：在页面的 JSON 编辑框填写对象。例如请求头 `{"OpenAI-Project":"proj_example"}`、参数 `{"top_p":0.9}`。已有独立设置项的字段不能在此重复指定。
-- “测试翻译”：使用当前页面尚未保存的配置，发送固定文本 `Hello, world!`；按服务的正常请求计费。可取消。获取模型同样使用页面中的密钥、地址和请求头。
+可选语言为简体中文、英语、日语、韩语、德语、法语、西班牙语；源语言另有自动检测。提示词必须包含 `{{targetLanguage}}`，并可使用 `{{sourceLanguage}}`。长度沿用 UTF-16 代码单元，emoji 等补充平面字符算两个，不能以 UTF-8 字节数代替。
 
-切换提供商会保留两边的编辑内容，“保存全部”同时保存；当前所选提供商用于之后的选区翻译。允许先保存未填写密钥的配置，实际翻译或测试前会提示补全。
+超时范围 1–600 秒，默认 30；输入上限 1–200000，默认 20000；响应上限 16–16384 KiB，默认 2048；译文字号 10–32。
 
-OpenAI Responses 请求设置 `store: false`，从完成的 assistant 消息中读取译文；DeepSeek 仅显示最终 `content`，不把 `reasoning_content` 当作译文。所有请求均为非流式，支持取消、超时和旧响应隔离。
+### 百度 OCR
 
-### 翻译
+识别使用固定 HTTPS 地址的 `/oauth/2.0/token` 与 `/rest/2.0/ocr/v1/accurate_basic`，PNG 经 Base64 和表单转义提交，`language_type=auto_detect`。短边至少 15、长边最多 8192 像素，图像表单编码最多 10 MB，响应最多 2 MiB。
 
-- 源语言（默认自动检测）、目标语言（默认简体中文）。
-- 翻译提示词及恢复默认按钮。`{{sourceLanguage}}`、`{{targetLanguage}}` 在请求前替换；目标语言占位符必须保留。
-- 请求超时：1–600 秒，默认 30 秒。
-- 选中文本长度上限：1–200000 个 UTF-16 代码单元，默认 20000。
-- 响应大小上限：16–16384 KiB，默认 2048 KiB。
+Token 只在内存缓存，按完整凭据区分，预留 60 秒过期裕量；错误 110/111 最多重新获取一次 token，所有网络阶段共用本次超时。空结果、权限和额度错误明确失败。重新翻译复用已识别文字，不重新发送图片；截图和译文不写入历史文件。
 
-### 快捷键与窗口
+## 验证、运行与安装
 
-- 点击“录制”，按含 Ctrl、Alt 或 Meta 的组合；Esc 取消录制。“清空”禁用，“默认快捷键”从 `AppSettings::defaults()` 读取平台默认值。保存时由当前平台后端检查注册结果，失败会提示且不保存新设置；无需用户手动修改系统快捷键配置。
-- 弹窗位置：鼠标所在屏幕中央或鼠标附近，均限制在屏幕可用区域内。
-- 译文字号、是否置顶，以及关闭后是否恢复原应用焦点。翻译窗统一按原文和译文自动计算宽高，不再提供或保存手动尺寸。
-
-自动尺寸使用与显示控件相同的字体测量文本，译文返回或字号变化时合并布局更新。短词使用紧凑窗口，长段落扩展到当前屏幕可用区域内的阅读上限，超出部分滚动显示。结果返回时在原屏幕调整尺寸，不跟随已经移开的鼠标；窗口装饰边框也包含在边界检查中。
-
-设置窗是翻译窗的非模态从属对话框，翻译窗置顶或重新显示时，设置窗仍保持在它上方；单独显示设置窗时不置顶。Linux 翻译窗使用普通窗口类型以避免 KDE 的工具窗口层级冲突，通过 KDE 窗口接口隐藏任务栏和分页器条目；Windows 由原生后端设置对应窗口样式。滚轮先交给鼠标下的控件处理，提示词等内层编辑框到达边界后交给外层页面；侧边滚动条也支持滚轮，无需先点击获得焦点。
-
-Linux 全局快捷键通过 KGlobalAccel 经会话 D-Bus 注册到 KDE 的 `kglobalacceld`，组件名为 `trans`，动作名为 `translate-selection`。KDE 在 `~/.config/kglobalshortcutsrc` 中保留绑定；程序启动时先恢复绑定，再应用 Trans 本地配置中的快捷键。KDE 的可用性查询会把当前动作自己的活动绑定也视为占用，因此冲突检查先排除当前动作已持有的键。Linux 通过 D-Bus 服务 `io.github.trans.Trans` 确保单实例，后续进程仅向已有实例转发命令，不重复注册快捷键。
-
-### 截图 OCR
-
-`ScreenshotService::captureRegion` 创建平台无关的 `ScreenshotJob`。Linux 工厂明确区分 xcb 与 wayland/wayland-egl，不把其他显示插件误当 Portal。X11 使用 `X11RegionScreenshotJob`：先捕获所有屏幕，再为每块屏幕显示冻结画面的 `RegionOverlay`，用户左键拖动并松开后只返回框选的 `QImage`。坐标按逻辑窗口尺寸与实际图片尺寸映射，支持不同缩放比例、反向拖动和负坐标屏幕；拖动限制在起始屏幕内。单击或小于 15 像素的选区不会提交。Esc、右键、超时、屏幕布局变化和请求替换均关闭遮罩，释放键盘抓取。截图全程在内存中处理。
-
-保留 `PortalScreenshotJob` 供后续 Wayland 适配，通过 Qt DBus 调用 `org.freedesktop.portal.Screenshot`；必须是版本 3 且 `AvailableTargets` 包含区域目标才发送 `target=4`。旧版 `interactive=true` 并不保证有区域选项，因此不再回退为全屏截图，而是明确提示区域截图不可用。调用前订阅预期请求路径的 `Response`，返回不同路径时调整订阅；取消时调用 `Request.Close`。两种截图交互最长等待 180 秒。
-
-`BaiduOcrProvider` / `OcrJob` 单独实现百度 `accurate_basic`：PNG → Base64 → 百分号转义表单，`language_type=auto_detect`。按 docs/OCR.pdf 该接口章节限制像素和编码后体积（15–8192 像素、10 MB），不套用文档概述中其他接口的限制。采用固定百度 HTTPS 地址，保留 TLS 验证，禁止自动重定向；测试可注入本地地址。API Key 和 Secret Key 获取的 token 仅内存缓存，预留 60 秒过期裕量；错误 110/111 最多刷新一次，刷新也计入本次 OCR 超时。响应最多 2 MiB。
-
-控制器状态包含 `selecting`、`capturing`、`recognizing`，共用请求编号隔离旧选区、截图、OCR 和翻译响应。识别文字逐行保留，交给现有翻译方法和输入上限检查；重新翻译不重新识别。截图时隐藏两个窗口但保留设置草稿；截图取消恢复先前内容，识别失败提示重新截图。关闭结果窗取消当前请求。
-
-动作 `translate-screenshot` 在 Linux 默认 Meta+Shift+O，Windows 默认 Ctrl+Alt+O；`TranslateScreenshot` 同时通过 QML、托盘和平台单实例通道暴露。快捷键保存先释放变更绑定，以支持交换两个快捷键；应用绑定或持久化失败时尝试恢复原绑定，恢复失败显示实际状态。OCR 密钥使用平台配置文件权限与原子保存机制。Portal 返回本地 URI 后读取为 `QImage`，不保存历史、不删除归属不明的 Portal 文件。
-
-`trans_ocr_tests` 使用本地 HTTP 服务与私有 D-Bus，覆盖鉴权缓存和刷新、请求编码、图片限制、空结果/额度/超时/取消、Portal 能力与响应、任务替换和快捷键回滚，不访问真实百度服务。配置页测试覆盖 OCR 草稿、保存和截图取消恢复。区域裁剪测试验证像素内容、反向拖动、缩放映射和误点击；可选 X11 测试使用真实鼠标拖动验证返回的图片尺寸及 Esc 取消。
-
-### 本地存储与迁移
-
-1.0.0 更名为 Trans：CMake 项目/目标与命令使用 `trans`，C++ 命名空间和 QML 模块使用 `Trans` / `Trans.Core`，桌面与 D-Bus ID 为 `io.github.trans.Trans`，对象路径为 `/Trans`，KGlobalAccel 组件为 `trans`。旧进程应先退出；系统快捷键中的旧组件绑定可能需要手动清除。构建选项和测试环境变量同步为 `TRANS_*`。
-
-新版只使用 `trans/settings.ini`，不尝试读取或导入旧 `tran/settings.ini`。冒烟测试使用临时配置，不访问用户配置。
-
-Linux 配置默认保存于 `~/.config/trans/settings.ini`，遵循 `XDG_CONFIG_HOME`；Windows 使用 `QStandardPaths::AppConfigLocation`，通常为 `%LOCALAPPDATA%\trans\settings.ini`。**密钥以明文保存在应用本地文件**，不使用系统密钥库。Linux 目录权限为 `0700`，文件为 `0600`；Windows 对目录及最终文件建立仅当前用户/SYSTEM 的受保护 DACL，临时文件在写入内容前即建立相同权限，使用同目录写入和替换。权限设置或原子替换失败会保留原文件和生效配置，不回退为无保护保存。
-
-旧版的 OpenAI 地址、密钥、模型会自动读入并保留 Chat Completions 模式。旧版其他提供商不再可选，原先选中其他提供商时回到 OpenAI；下一次从页面保存时清理它们的配置。模型获取不写入配置，测试翻译不会自动保存编辑内容。
-
-旧版 `window/width`、`window/height` 和 `window/rememberSize` 不再读取；下一次保存设置时移除这些字段。窗口关闭和自动调整大小都不会写入配置。
-
-最近一次原文和译文保留在内存中，关闭弹窗不会清除，退出程序后清除，不写入磁盘。只在用户触发翻译时读取 Linux X11 PRIMARY 或 Windows UI Automation 选区，重新打开窗口不会读取选区；除“复制译文”外，不修改普通剪贴板。不支持 Wayland 选区读取或翻译历史；截图在 X11/Windows 使用内置框选，并保留 Portal 后端供后续 Wayland 适配。
-
-## 验证与本地安装
-
-`ctest --preset dev` 使用本机模拟 HTTP 服务、临时配置和隔离 D-Bus，覆盖两家提供商请求格式、响应解析、鉴权/超时/取消、过期响应、配置迁移、权限、配置页编辑和保存、快捷键冲突及失败回滚。不访问真实翻译服务，也不注册真实桌面快捷键。离屏测试加载全部配置页；QML 静态检查可执行：
+### 可重复的业务回归
 
 ```sh
-conda run -n myself --no-capture-output cmake --build build --target trans_qmllint
-QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software ./build/trans --smoke-test --screenshot build/settings-preview.png
+cmake --build build --target trans_business_test_driver
+ctest --test-dir build -R native_business --output-on-failure
 ```
 
-界面回归覆盖深浅主题、480×360 翻译窗、500×420 设置窗、长文本、等待/成功/失败/取消状态，以及复制、重试、服务下拉菜单、导航与页面滚动。可用临时配置和模拟译文生成界面预览，不调用翻译 API：
+`tests/test_native_business.py` 启动本机临时 HTTP 服务，调用实际 C++/libcurl 和临时配置文件，覆盖 INI 转义/Unicode/迁移、JSON 优先级及损坏保护、提供商协议、完整译文、模型列表、输入边界、受管头/参数、响应限长（含 gzip）、错误脱敏、超时及请求发出后的取消。没有调用真实付费服务。
+
+OCR 本地回归目前覆盖无效 PNG 和尺寸的发送前拒绝；**不等于有效图片的真实 OAuth、token 缓存/刷新、百度额度或端到端识别已经验收**。TLS 证书链、系统代理、Windows 原生交互和 Wayland Portal 也需要独立场景。旧 QtTest/QML 测试通过记录不能沿用为本实现的证据。
+
+### 真实窗口冒烟
+
+在可用的桌面会话中执行：
 
 ```sh
-conda run -n myself --no-capture-output env QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software TRANS_UI_SCREENSHOT_DIR=/tmp/trans-ui-previews ./build-release/trans_tests redesignedUi
+./build/trans --smoke-test
 ```
 
-README 的截图使用上述输出中的 `dark-compact-translation.png`、`light-compact-translation.png`、`dark-settings-0.png`、`dark-settings-3.png`，分别对应 `docs/images/translation-dark.png`、`translation-light.png`、`settings-dark.png`、`ocr-settings-dark.png`。版本文字来自 CMake 项目版本，示例密钥和译文均为测试数据。
+冒烟模式打开真实翻译和设置窗口，运行事件循环后输出 `TRANS_SMOKE_PASS` 并退出；不注册正常实例或全局快捷键，不读写用户配置，也不调用翻译 API。它需要实际显示服务，不支持旧的 Qt offscreen 环境变量。
 
-桌面验收：在浏览器、编辑器、终端和含文本层的 PDF 中选中内容并触发翻译，检查快捷键、双屏位置和关闭后焦点；关闭翻译窗后从托盘重新打开，确认恢复原文和译文且不发起新请求；在配置中心填写实际密钥后点击“测试翻译”验证服务。
-
-选区翻译窗通过窗口事件过滤器处理 Esc，关闭时取消正在执行的翻译。设置窗使用自己的 Esc 快捷键；录制快捷键时，第一次 Esc 仅取消录制。两窗同时显示时，Esc 只操作当前获得焦点的窗口。
-
-可选的真实 KDE X11 回归测试需要 `xdotool`，会打开临时选区源窗口、注册临时全局快捷键并发送实际鼠标和 Esc 按键事件；使用固定文本和模拟翻译，不调用 API。测试包含设置入口的窗口层级和滚轮、快捷键重启恢复、重复应用与真实冲突，以及焦点交接、原文选区、译文控件焦点、两个窗口同时显示和关闭后焦点恢复，结束后清理测试窗口及快捷键：
+无桌面的 Linux CI 可安装 Xvfb/Mesa 后执行：
 
 ```sh
-conda run -n myself --no-capture-output cmake --preset dev -DTRANS_X11_TESTS=ON
-conda run -n myself --no-capture-output cmake --build build --target trans_x11_tests
-conda run -n myself --no-capture-output env QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software ./build/trans_x11_tests
+sudo pacman -S --needed xorg-server-xvfb mesa
+xvfb-run -a env SLINT_BACKEND=winit-femtovg LIBGL_ALWAYS_SOFTWARE=1 ./build/trans --smoke-test
 ```
 
-更新代码后须重新构建正在使用的版本，并从托盘退出旧进程后重新启动；再次启动程序会转发给已有实例，不会自动替换正在运行的旧版本。
+这里的软件 OpenGL 是 Mesa llvmpipe，不是已禁用的 Slint software renderer。Xvfb 不提供真实 KDE 快捷键、托盘宿主或 Wayland Portal；不得把这条命令的成功扩展为这些服务已验收。
+
+### 命令行及安装
 
 ```sh
-conda run -n myself --no-capture-output cmake --preset release
-conda run -n myself --no-capture-output cmake --build --preset release
-conda run -n myself --no-capture-output ctest --preset release
-cmake --install build-release --prefix "$HOME/.local"
+./build/trans --help
+./build/trans --version
+./build/trans --settings
+./build/trans --translate
+./build/trans --ocr
+cmake --install build --prefix "$HOME/.local" --component Runtime
 ```
 
-确保 `~/.local/bin` 在桌面会话 PATH 中。安装后可从 KDE 应用启动器打开；需要登录自启时，在 KDE“自动启动”添加 Trans。
+常规重复启动通过平台单实例通道转交命令；更新程序前先从托盘退出旧实例。只安装 `Runtime` 组件，避免把 Slint SDK、头文件和构建工具一起打包。确认 `~/.local/bin` 在桌面会话 PATH 中。
 
-## GitHub 自动打包与发布
+### 发布前桌面验收
 
-将本仓库（包含 `.github/workflows/package.yml` 与 `packaging/`）提交并推送到 GitHub 后，Actions 会自动构建 **Arch Linux x86_64 原生安装包**。构建运行在官方 `archlinux:base-devel` 容器中，使用系统 Qt/KDE，不需要 conda。
+Windows 10 22H2、Windows 11、Plasma X11、目标 Wayland 桌面分别记录结果：中文/输入法/混合字体，选区安全限制，托盘重新打开，两快捷键冲突和交换，配置保存失败回滚，多屏负坐标与 100/125/150/200% DPI，截图不含自身窗口，Esc/右键取消，置顶/从属层级/焦点恢复，单实例就绪和跨会话隔离，以及退出后的线程/helper/快捷键释放。
 
-- **普通 push / PR**：运行打包检查、Release 编译、QML 检查、全部离屏回归测试；再用新容器安装包并检查启动。成功后的包和 `SHA256SUMS` 位于该次 Actions 的 `trans-arch-x86_64` Artifact，保留 14 天。
-- **推送版本标签**：完成相同检查后，自动创建 GitHub Release 并上传安装包和校验文件。使用内置 `GITHUB_TOKEN`，无需添加个人令牌；仅发布任务需要 `contents: write` 权限。
-- 标签必须是 `vX.Y.Z`，并与 `CMakeLists.txt` 的 `project(trans VERSION X.Y.Z ...)` 一致，否则失败且不发布。程序版本、设置页版本与包版本都来自该 CMake 版本。
-- 重跑同一标签会复用 Release 并替换同名附件。普通提交不会创建 Release。
+还须检查成品 EXE/DLL/ELF 的直接和传递依赖、动态后端加载和许可证文件；没有 Qt 命名 DLL 不足以证明没有静态或传递 Qt。真实 API 验收会发送数据并可能计费，应使用获授权的测试账户和内容，不把密钥写入日志或截图。
 
-例如发布当前 `1.0.0` 版本，先提交并推送代码，再推送标签；分支名按实际仓库替换：
+## 打包与许可证
 
-```sh
-git push origin main
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-后续版本先修改并提交 CMake 项目版本，再推送对应标签。GitHub 仓库的 Actions 必须启用；组织的令牌权限限制仍需允许发布任务写入 Releases。
-
-用户下载、更新和安装步骤见 [README](../README.md#安装)。实际容器构建、安装验证和附件上传结果以对应 Actions 运行记录为准。
-
-### 本地打包
-
-本地也可生成相同包。需要仓库具有可用的 Git 提交，并以普通用户执行 `makepkg`。`prepare.py` 使用 `git archive HEAD`，仅打包**已提交文件**，不会带入未提交配置或本机构建产物；`PKGBUILD` 是由该脚本填入版本及源码校验值的模板。
+[Arch 工作流](../.github/workflows/package.yml) 使用官方 Arch 容器和系统原生库，不需要 Qt SDK。`packaging/prepare.py` 仍从 Git 提交归档源码，并检查标签与 CMake 项目版本一致。它不会打包未提交的文件或本地密钥。生成打包输入的命令为：
 
 ```sh
-sudo pacman -S --needed base-devel python cmake ninja qt6-base qt6-declarative qt6-svg kglobalaccel kwindowsystem ca-certificates hicolor-icon-theme dbus desktop-file-utils ttf-dejavu noto-fonts-cjk
 python3 packaging/prepare.py --output-dir dist/arch
-cd dist/arch
-makepkg --cleanbuild --noconfirm
-```
-
-`prepare.py` 可附加 `--repository owner/repository` 设置包的项目地址，附加 `--tag v1.0.0` 验证标签与版本匹配。在 Actions 中，这两个值由工作流传入。生成的文件为 `trans-版本-1-x86_64.pkg.tar.zst`。
-
-打包脚本的快速本地检查：
-
-```sh
 bash -n packaging/PKGBUILD packaging/build-arch.sh packaging/verify-arch.sh
 python3 -m unittest discover -s tests -p test_packaging.py -v
 ```
 
-[build-arch.sh](../packaging/build-arch.sh) 和 [verify-arch.sh](../packaging/verify-arch.sh) 供一次性 Arch 容器使用，会安装依赖并创建构建或测试用户；容器挂载和执行方式见 [工作流](../.github/workflows/package.yml)。验证脚本检查校验值、安装依赖、精确版本、程序/图标/桌面入口及包中是否有意外文件，再以普通用户运行 `trans --version` 和离屏启动。真实 KDE X11 交互测试不在 CI 中执行。第三方 Actions 固定到提交 SHA。
+`packaging/build-arch.sh` 和 `packaging/verify-arch.sh` 面向一次性容器，会安装依赖、创建构建/验收用户；不要直接在日常宿主上以 root 试跑。发布版本和产物状态以对应 Actions 记录为准，文档不承诺尚未执行的 Windows 或容器流程通过。
+
+Slint 的 [Royalty-free Desktop, Mobile, and Web Applications License 2.0](https://github.com/slint-ui/slint/blob/v1.18.1/LICENSES/LicenseRef-Slint-Royalty-free-2.0.md)第 2(b) 条允许在易于找到的公开网页展示官方归属标识，优先选择应用下载页面。当前采用这一外部标识方式：README 下载说明附近展示固定到 v1.18.1 的官方 Made with Slint 标识，发布页面也应保留它；应用侧栏仅显示版本，不放置 Slint 标识或网站入口。分发包仍保留 Slint 和其他依赖的声明。维护者须核对其余授权要求，项目整体许可证尚未声明，不能把第三方许可证替代为项目许可证。
+
+协议参考：[OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create)、[OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、[DeepSeek Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion)。迁移边界和尚未取得的验收证据见[迁移记录](slint-refactor-plan.md)。
