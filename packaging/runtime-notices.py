@@ -383,16 +383,20 @@ def bundle(args):
         copyright_files = [path for directory in notice_directories
                            for path in directory.glob("COPYRIGHT.html*") if path.is_file()]
     if not copyright_files:
-        raise RuntimeError("The installed Rust toolchain is missing its generated standard-library copyright notice")
+        raise RuntimeError("The installed Rust toolchain is missing its generated copyright notice")
     generated = copyright_files[0]
-    copy_notice(generated, rust_notices / "COPYRIGHT-library.html")
-    # In-tree Unicode tables and platform code carry licenses beyond the two
-    # Rust-wide choices. Preserve the generated copyright list plus their texts.
+    # Minimal rustup installations may have only the toolchain-wide document.
+    # Keep its original scope rather than labelling it as library-only.
+    notice_name = "COPYRIGHT-library.html" if generated.name.startswith("COPYRIGHT-library") else "COPYRIGHT.html"
+    copy_notice(generated, rust_notices / notice_name)
+    # The generated notice declares every included term. Keep it verbatim and
+    # supply texts for all terms, including those not in rust-lang/rust/LICENSES.
     expressions = re.findall(r"<b>License:</b>\s*([^<]+)", generated.read_text(encoding="utf-8"))
     identifiers = set()
     for expression in expressions:
         identifiers.update(re.findall(r"[A-Za-z0-9][A-Za-z0-9.+-]*", html.unescape(expression)))
     identifiers.difference_update({"AND", "OR", "WITH"})
+    spdx_references = []
     for identifier in sorted(identifiers):
         source = next((directory / "LICENSES" / (identifier + ".txt") for directory in notice_directories
                        if (directory / "LICENSES" / (identifier + ".txt")).is_file()), None)
@@ -402,8 +406,36 @@ def bundle(args):
         else:
             if not commit:
                 raise RuntimeError("Cannot determine the source revision for Rust license " + identifier)
-            download_notice("https://raw.githubusercontent.com/rust-lang/rust/" + commit.group(1)
-                            + "/LICENSES/" + identifier + ".txt", destination)
+            original = "https://raw.githubusercontent.com/rust-lang/rust/" + commit.group(1) \
+                + "/LICENSES/" + identifier + ".txt"
+            try:
+                download_notice(original, destination)
+            except RuntimeError as error:
+                if not isinstance(error.__cause__, urllib.error.HTTPError) or error.__cause__.code != 404:
+                    raise
+                # The toolchain-wide copyright can declare third-party terms
+                # whose standalone text is not in the rust-lang/rust tree.
+                reference = f"https://raw.githubusercontent.com/spdx/license-list-data/{SPDX_REVISION}/json/details/" \
+                    + urllib.parse.quote(identifier, safe="") + ".json"
+                record = json.loads(upstream_bytes(reference))
+                if record.get("licenseId") != identifier or not isinstance(record.get("licenseText"), str) \
+                        or not record["licenseText"].strip():
+                    raise RuntimeError("Unrecognized canonical SPDX license: " + identifier)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(record["licenseText"], encoding="utf-8")
+                spdx_references.extend([
+                    identifier + ": declared in " + notice_name,
+                    "Original standalone text absent at: " + original,
+                    "Canonical SPDX reference text (not an original upstream LICENSE file): " + reference,
+                    "SHA256: " + hashlib.sha256(destination.read_bytes()).hexdigest(),
+                    "",
+                ])
+    if spdx_references:
+        (rust_notices / "SPDX-REFERENCES.txt").write_text(
+            "The installed Rust copyright notice is retained verbatim. The following declared terms\n"
+            "have no standalone license text at the installed compiler's immutable source revision.\n"
+            "Reference texts are from SPDX license-list-data revision " + SPDX_REVISION + ".\n\n"
+            + "\n".join(spdx_references), encoding="utf-8")
     for name in ("LICENSE-APACHE", "LICENSE-MIT", "COPYRIGHT"):
         candidates = [sysroot / "share/doc/rust" / name, sysroot / name]
         source = next((path for path in candidates if path.is_file()), None)

@@ -1244,7 +1244,10 @@ Error WindowsPlatform::writePrivateFile(const std::string &path, const std::stri
         if (!CreateDirectoryW(current.c_str(), security.attributes()) && GetLastError() != ERROR_ALREADY_EXISTS)
             return nativeError("Cannot create configuration directory");
         bool final = current == directory;
-        Handle opened(CreateFileW(current.c_str(), FILE_READ_ATTRIBUTES | (final ? WRITE_DAC : 0),
+        // SetSecurityInfo reads the existing DACL and enumerates children when
+        // propagating inheritable ACEs; WRITE_DAC alone is not sufficient.
+        const DWORD access = FILE_READ_ATTRIBUTES | (final ? READ_CONTROL | WRITE_DAC | FILE_LIST_DIRECTORY : 0);
+        Handle opened(CreateFileW(current.c_str(), access,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                                   FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
         if (!opened)
