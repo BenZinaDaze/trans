@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <commctrl.h>
+#include <cstddef>
 #include <cstring>
 #include <dwmapi.h>
 #include <exception>
@@ -1278,7 +1279,7 @@ Error WindowsPlatform::writePrivateFile(const std::string &path, const std::stri
     if (nonce.empty())
         return {"Cannot generate a private temporary filename."};
     const auto temporary = directory / (L".settings-" + nonce + L".tmp");
-    Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, security.attributes(), CREATE_NEW,
+    Handle file(CreateFileW(temporary.c_str(), GENERIC_WRITE | DELETE, 0, security.attributes(), CREATE_NEW,
                             FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!file)
         return nativeError("Cannot create private configuration file");
@@ -1302,10 +1303,18 @@ Error WindowsPlatform::writePrivateFile(const std::string &path, const std::stri
     }
     if (!FlushFileBuffers(file.get()))
         return nativeError("Cannot flush private configuration");
-    HANDLE raw = file.release();
-    if (!CloseHandle(raw))
-        return nativeError("Cannot close private configuration");
-    if (!MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    // Windows 10+ POSIX rename preserves existing reader snapshots while new
+    // readers see the replacement, including its private ACL rather than the old ACL.
+    const auto &destination = target.native();
+    const auto nameBytes = destination.size() * sizeof(wchar_t);
+    const auto renameBytes = sizeof(FILE_RENAME_INFO) + nameBytes;
+    auto renameStorage = std::make_unique<std::byte[]>(renameBytes);
+    auto *rename = reinterpret_cast<FILE_RENAME_INFO *>(renameStorage.get());
+    rename->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+    rename->RootDirectory = nullptr;
+    rename->FileNameLength = static_cast<DWORD>(nameBytes);
+    std::memcpy(rename->FileName, destination.c_str(), nameBytes + sizeof(wchar_t));
+    if (!SetFileInformationByHandle(file.get(), FileRenameInfoEx, rename, static_cast<DWORD>(renameBytes)))
         return nativeError("Cannot atomically replace private configuration");
     return {};
 }
