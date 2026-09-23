@@ -39,6 +39,9 @@
 #include <QTest>
 #include <QTimer>
 #include <QtTest/qtestwheel.h>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#endif
 
 using namespace Trans;
 
@@ -359,6 +362,15 @@ private slots:
         popup->resize(compact ? QSize(480, 360) : QSize(600, 480));
         popup->show();
         QTRY_VERIFY(popup->isExposed());
+#ifdef Q_OS_WIN
+        if (QGuiApplication::platformName() == QStringLiteral("windows")) {
+            TITLEBARINFO titleBar{};
+            titleBar.cbSize = sizeof(titleBar);
+            QVERIFY(GetTitleBarInfo(reinterpret_cast<HWND>(popup->winId()), &titleBar));
+            // The last title-bar child is the close button.
+            QVERIFY(!(titleBar.rgstate[5] & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_UNAVAILABLE)));
+        }
+#endif
         const QString previewDirectory = qEnvironmentVariable("TRANS_UI_SCREENSHOT_DIR");
         const auto render = [](QQuickWindow *target) {
             QSignalSpy frame(target, &QQuickWindow::frameSwapped);
@@ -473,6 +485,15 @@ private slots:
                 QVERIFY(position.y() >= 0 && position.y() + lastField->height() <= settingsPage->height() + 1);
             }
         }
+#ifdef Q_OS_WIN
+        if (QGuiApplication::platformName() == QStringLiteral("windows"))
+            SendMessageW(reinterpret_cast<HWND>(popup->winId()), WM_SYSCOMMAND, SC_CLOSE, 0);
+        else
+#endif
+            popup->close();
+        QTRY_VERIFY(!popup->isVisible());
+        popup->show();
+        QTRY_VERIFY(popup->isExposed());
         QVERIFY2(warnings.isEmpty(), "Redesigned UI must load and handle every state without QML warnings.");
     }
 

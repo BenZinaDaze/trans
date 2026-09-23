@@ -93,7 +93,7 @@ ApplicationWindow {
     palette.highlight: ui.accent
     palette.highlightedText: ui.accentText
     palette.placeholderText: ui.muted
-    flags: Qt.Window | (appSettings.stayOnTop ? Qt.WindowStaysOnTopHint : 0) | Qt.WindowCloseButtonHint | Qt.WindowTitleHint
+    flags: Qt.Window | (appSettings.stayOnTop ? Qt.WindowStaysOnTopHint : 0) | Qt.WindowCloseButtonHint | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
     onClosing: function(close) {
         close.accepted = false
         desktop.closeTranslation()
