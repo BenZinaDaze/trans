@@ -121,17 +121,26 @@ $systemDlls | Sort-Object | Set-Content -Encoding utf8 (Join-Path $stage 'SYSTEM
 $savedPath = $env:PATH
 $savedBackend = $env:SLINT_BACKEND
 $savedConfig = $env:SLINT_STYLE
+$savedBacktrace = $env:RUST_BACKTRACE
+$smokeOutput = Join-Path $output 'smoke-stdout.txt'
+$smokeError = Join-Path $output 'smoke-stderr.txt'
 try {
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     $env:SLINT_BACKEND = 'winit-femtovg'
     $env:SLINT_STYLE = $null
-    $process = Start-Process $application -ArgumentList '--smoke-test' -WorkingDirectory $stage -PassThru
+    $env:RUST_BACKTRACE = '1'
+    $process = Start-Process $application -ArgumentList '--smoke-test' -WorkingDirectory $stage -PassThru `
+        -RedirectStandardOutput $smokeOutput -RedirectStandardError $smokeError
     if (!$process.WaitForExit(30000)) { $process.Kill($true); $process.WaitForExit(); throw 'Packaged application startup timed out' }
     if ($process.ExitCode -ne 0) { throw "Packaged application smoke failed: $($process.ExitCode)" }
 } finally {
+    foreach ($log in @($smokeOutput, $smokeError)) {
+        if (Test-Path $log) { Get-Content $log }
+    }
     $env:PATH = $savedPath
     $env:SLINT_BACKEND = $savedBackend
     $env:SLINT_STYLE = $savedConfig
+    $env:RUST_BACKTRACE = $savedBacktrace
 }
 $inventory = @(Get-ChildItem $stage -Recurse -File | Sort-Object FullName | ForEach-Object {
     [pscustomobject]@{
