@@ -55,6 +55,8 @@ cmake --build build-sdk --parallel 2
 
 直接使用未修改的官方 Linux 1.18.1 SDK 缺少上述接口；不要通过扫描窗口或恢复 Qt 后端绕过这个错误。
 
+主程序以 `SLINT_EMBED_RESOURCES=embed-files` 编译 Slint 图片资源，包括托盘 SVG。Linux 和 Windows 分发包不得依赖构建机器上的源码绝对路径；仅安装桌面图标到 hicolor 目录并不能替代嵌入。验收托盘时应让源码资源目录不可访问，确认图标实际注册、显示及响应点击，而不只检查后台进程或窗口启动。
+
 ### Windows 原生构建
 
 目标为 Windows 10 22H2 / Windows 11 x64。安装 Visual Studio 2022 的 C++ 桌面组件、CMake、Git、Python、Rust 和 vcpkg，并在 x64 开发环境执行。以下使用已有的 `VCPKG_ROOT`；版本化发布以 Windows 工作流中锁定的依赖为准：
