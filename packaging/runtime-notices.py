@@ -5,10 +5,12 @@ import functools
 import hashlib
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
@@ -28,11 +30,32 @@ def copy_notice(source, destination):
     shutil.copyfile(source, destination)
 
 
+class GitHubAuthHandler(urllib.request.BaseHandler):
+    """Reapply credentials only to HTTPS GitHub API requests, including redirects."""
+
+    def __init__(self, token):
+        self.token = token
+
+    def https_request(self, request):
+        if urllib.parse.urlsplit(request.full_url).hostname == "api.github.com":
+            request.add_unredirected_header("Authorization", "Bearer " + self.token)
+        return request
+
+
 @functools.lru_cache(maxsize=128)
 def upstream_bytes(url, limit=4 * 1024 * 1024):
     request = urllib.request.Request(url, headers={"User-Agent": "Trans-runtime-notices"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        contents = response.read(limit + 1)
+    open_url = urllib.request.urlopen
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "https" and parsed.hostname == "api.github.com":
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if token:
+            open_url = urllib.request.build_opener(GitHubAuthHandler(token)).open
+    try:
+        with open_url(request, timeout=60) as response:
+            contents = response.read(limit + 1)
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Cannot download upstream notice {url}: {error}") from error
     if not contents or len(contents) > limit:
         raise RuntimeError("Invalid upstream notice download: " + url)
     return contents
@@ -321,11 +344,14 @@ def bundle(args):
             explicit = (directory / license_file).resolve(strict=True)
             if explicit not in files:
                 files.append(explicit)
-        upstream = False
-        if not license_file and not any(LICENSE_TEXT_NAME.match(path.name) for path in files) and not directory.is_relative_to(slint):
-            upstream = collect_embedded_notices(directory, destination) \
-                or collect_upstream_notices(package, directory, destination) \
-                or collect_declared_spdx(package, directory, destination)
+        try:
+            upstream = False
+            if not license_file and not any(LICENSE_TEXT_NAME.match(path.name) for path in files) and not directory.is_relative_to(slint):
+                upstream = collect_embedded_notices(directory, destination) \
+                    or collect_upstream_notices(package, directory, destination) \
+                    or collect_declared_spdx(package, directory, destination)
+        except RuntimeError as error:
+            raise RuntimeError(f"Failed to collect notices for {name} {version}: {error}") from error
         for source in files:
             relative = source.relative_to(directory) if source.is_relative_to(directory) else Path(source.name)
             copy_notice(source, destination / relative)

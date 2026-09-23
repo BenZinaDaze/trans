@@ -43,8 +43,11 @@ jobs:
       - name: Pull official Arch Linux image
         run: docker pull archlinux:base-devel
       - name: Build Qt-free Slint package and run native checks
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           docker run --rm \
+            --env GH_TOKEN \
             --mount "type=bind,src=$RUNNER_TEMP/trans-input,dst=/input,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/trans-packages,dst=/output" \
             --mount "type=bind,src=$GITHUB_WORKSPACE/packaging,dst=/scripts,readonly" \
