@@ -74,6 +74,8 @@ ctest --test-dir build-windows -C Release --output-on-failure
 
 主程序和 `trans_selection_helper.exe` 必须一起分发。部署及工作流入口为 [`packaging/deploy-windows.ps1`](../packaging/deploy-windows.ps1)、[Windows 工作流](../.github/workflows/windows.yml)；它们收集实际原生 DLL、CRT 和第三方声明，不调用 `windeployqt`。不得从旧版目录带入 Qt DLL/QML 插件。Windows 编译或 CI 产物成功不能替代 Windows 10/11 普通用户桌面验收。
 
+Windows 的 FemtoVG 渲染路径要求 OpenGL 2.0 驱动。GitHub 托管 Windows runner 默认不满足此条件，因此工作流在临时 runner 中安装固定版本 Mesa 软件 OpenGL 后运行真实分发程序的窗口冒烟；这不是禁用检查，也不是启用 Slint software renderer。Mesa 不进入应用 ZIP，用户机器仍需提供兼容显卡驱动；CI 通过不等于无驱动 Windows 环境可运行。
+
 ## 源码结构与执行模型
 
 ```text

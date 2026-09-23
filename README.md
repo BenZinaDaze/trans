@@ -37,6 +37,8 @@ Linux 选区读取使用 X11 PRIMARY，快捷键依赖 KDE 的 KGlobalAccel 桌�
 
 最低目标版本为 Windows 10 22H2，Windows 11 共用同一个 x64 程序包；不提供 ARM64 或 32 位版本。
 
+当前图形后端需要支持 **OpenGL 2.0** 的显卡驱动。仅有 Windows 基本显示驱动或缺少图形加速的虚拟机不保证能启动；发行包不内置 Mesa 软件 OpenGL。
+
 1. 新 Windows 工作流运行成功后，可从 [Actions](https://github.com/BenZinaDaze/trans/actions) 的 **Windows x64 package** 下载构建产物；对应新版本标签发布成功后，ZIP 和 `SHA256SUMS-windows-x64` 也会出现在 Releases。
 2. 用 PowerShell 的 `Get-FileHash -Algorithm SHA256 .\trans-<版本>-windows-x64.zip` 核对校验文件中的值。
 3. 将 ZIP 完整解压到可写目录，运行其中的 `trans.exe`。不要只复制 EXE；`trans_selection_helper.exe`、Slint、libcurl/TLS、图像库、C/C++ 运行库及第三方声明均需保留。不需要安装 Qt SDK，也不应从旧版目录混入 Qt DLL 或插件。
